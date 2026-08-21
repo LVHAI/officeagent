@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     milvus_host: str = "localhost"
     milvus_port: int = 19530
 
+    crm_mcp_url: str = "http://localhost:8101/mcp"
+    database_mcp_url: str = "http://localhost:8102/mcp"
+    knowledge_mcp_url: str = "http://localhost:8103/mcp"
+    report_mcp_url: str = "http://localhost:8104/mcp"
+
     llm_api_key: str | None = None
     llm_base_url: str | None = None
     llm_model: str = "gpt-4o-mini"
