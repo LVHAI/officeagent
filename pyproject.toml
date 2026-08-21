@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Enterprise Intelligence Decision Agent Platform"
 requires-python = ">=3.12"
 dependencies = [
-  "deepagents>=0.0.10",
+  "deepagents>=0.7.4,<0.8",
   "fastapi>=0.116,<1",
   "langchain>=0.3,<1",
   "langchain-openai>=0.3,<1",
