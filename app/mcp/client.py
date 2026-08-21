@@ -21,6 +21,18 @@ class MCPTool:
     server: str
 
 
+@dataclass(frozen=True)
+class MCPToolResult:
+    """标准化 Tool Result，同时保留来源和执行耗时用于 Trace/Audit。"""
+
+    server: str
+    tool: str
+    content: Any
+    is_error: bool
+    elapsed_ms: float
+    request_id: str | None = None
+
+
 class MCPClient:
     """MCP Streamable HTTP Client，负责发现工具、调用工具及基础超时。"""
 
@@ -46,12 +58,15 @@ class MCPClient:
                             )
                             for tool in response.tools
                         ]
+        except asyncio.CancelledError:
+            # 任务取消必须原样传播，不能被统一异常包装或重试吞掉。
+            raise
         except TimeoutError as exc:
             raise MCPError(f"MCP tool discovery timed out: {self.server}") from exc
         except Exception as exc:
             raise MCPError(f"MCP tool discovery failed: {self.server}: {exc}") from exc
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> MCPToolResult:
         """调用单个 MCP Tool，并统一转换异常。"""
         started = time.monotonic()
         try:
@@ -60,13 +75,17 @@ class MCPClient:
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         result = await session.call_tool(name, arguments=arguments)
-                        return {
-                            "server": self.server,
-                            "tool": name,
-                            "elapsed_ms": round((time.monotonic() - started) * 1000, 2),
-                            "is_error": result.isError,
-                            "content": result.content,
-                        }
+                        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+                        return MCPToolResult(
+                            server=self.server,
+                            tool=name,
+                            elapsed_ms=elapsed_ms,
+                            is_error=bool(result.isError),
+                            content=result.content,
+                        )
+        except asyncio.CancelledError:
+            # 不将 CancellationError 转换成 MCPError，保证上层任务能够及时取消。
+            raise
         except TimeoutError as exc:
             raise MCPError(f"MCP tool call timed out: {self.server}/{name}") from exc
         except Exception as exc:
