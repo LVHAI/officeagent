@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -27,7 +28,9 @@ class MCPClient:
 
     async def discover_tools(self) -> list[MCPTool]:
         try:
-            response = await self.transport.list_tools()
+            response = await asyncio.wait_for(
+                self.transport.list_tools(), timeout=self.timeout_seconds
+            )
             tools = getattr(response, "tools", response)
             return [
                 MCPTool(
@@ -39,15 +42,25 @@ class MCPClient:
                 )
                 for tool in tools
             ]
+        except asyncio.TimeoutError as exc:
+            raise MCPTimeoutError("MCP tool discovery timed out") from exc
         except Exception as exc:  # noqa: BLE001 - 边界层统一归一化第三方异常
             raise MCPError(f"MCP tool discovery failed: {exc}") from exc
 
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         try:
-            return await self.transport.call_tool(tool_name, arguments)
+            return await asyncio.wait_for(
+                self.transport.call_tool(tool_name, arguments), timeout=self.timeout_seconds
+            )
+        except asyncio.TimeoutError as exc:
+            raise MCPTimeoutError(f"MCP tool invocation timed out: {tool_name}") from exc
         except Exception as exc:  # noqa: BLE001 - 边界层统一归一化第三方异常
             raise MCPError(f"MCP tool invocation failed: {tool_name}: {exc}") from exc
 
 
 class MCPError(RuntimeError):
     """MCP 边界统一异常。"""
+
+
+class MCPTimeoutError(MCPError):
+    """MCP 操作超时。"""
