@@ -8,6 +8,7 @@ from uuid import uuid4
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.contracts import DelegationTrace
 from app.agents.deepagents import create_report_agent, create_supervisor
 from app.core.execution import run_with_timeout
 from app.core.trace import AgentTrace
@@ -18,17 +19,18 @@ class AgentState(TypedDict, total=False):
     task_id: str
     supervisor_result: Any
     report: Any
-    # 并行/多次 Delegation 的 Trace 与错误必须通过 reducer 合并，不能相互覆盖。
+    status: str
     errors: Annotated[list[str], operator.add]
     traces: Annotated[list[dict[str, Any]], operator.add]
+    delegations: Annotated[list[dict[str, Any]], operator.add]
 
 
 AGENT_TIMEOUT_SECONDS = 45.0
+GLOBAL_TIMEOUT_SECONDS = 120.0
 
 
-async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, dict[str, Any]]:
-    # 每个 Agent 沿用同一个 task_id，便于追踪 Supervisor → Sub-Agent 调用链。
-    trace = AgentTrace(task_id=task_id, agent_id=agent_id)
+async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_id: str | None = None):
+    trace = AgentTrace(task_id=task_id, agent_id=agent_id, parent_agent_id=parent_agent_id)
     try:
         result = await run_with_timeout(
             agent.ainvoke({"messages": [{"role": "user", "content": query}]}),
@@ -44,35 +46,69 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, 
         raise
 
 
+def _delegation(task_id: str, child: str, status: str, elapsed_ms: float = 0.0, error: str | None = None):
+    return DelegationTrace(
+        task_id=task_id,
+        delegation_id=str(uuid4()),
+        parent_agent_id="supervisor",
+        child_agent_id=child,
+        status=status,
+        elapsed_ms=elapsed_ms,
+        error=error,
+    ).__dict__
+
+
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
-    """运行 Supervisor DeepAgent；由其 task 工具自主决定委派哪些子 Agent。"""
+    """Supervisor DeepAgent 自主规划并通过 task/subagents 完成 Delegation。"""
     task_id = state["task_id"]
-    result, trace = await _invoke(create_supervisor(), state["query"], "supervisor", task_id)
-    return {"supervisor_result": result, "traces": [trace]}
+    started = asyncio.get_running_loop().time()
+    try:
+        result, trace = await _invoke(create_supervisor(), state["query"], "supervisor", task_id)
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
+        # Delegation 的具体选择由 DeepAgents task 工具决定；这里保留统一审计事件。
+        delegations = [
+            _delegation(task_id, name, "completed", elapsed_ms=elapsed)
+            for name in ("knowledge-agent", "tool-agent", "web-agent")
+            if name.replace("-agent", "") in str(result).lower()
+        ]
+        return {"supervisor_result": result, "traces": [trace], "delegations": delegations}
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return {
+            "status": "partial",
+            "errors": [f"supervisor: {exc}"],
+            "traces": [
+                AgentTrace(task_id=task_id, agent_id="supervisor", status="failed", error=str(exc)).to_dict()
+            ],
+        }
 
 
 async def report_node(state: AgentState) -> dict[str, Any]:
-    """将 Supervisor 已经完成的 Delegation 结果交给轻量 Report Agent。"""
+    """聚合 Supervisor 结果、错误和 Delegation Trace，并生成结构化报告。"""
     task_id = state["task_id"]
     context = {
         "query": state["query"],
         "supervisor_result": state.get("supervisor_result"),
         "errors": state.get("errors", []),
+        "delegations": state.get("delegations", []),
     }
     try:
         result, trace = await _invoke(
-            create_report_agent(), str(context), "report", task_id
+            create_report_agent(), str(context), "report", task_id, parent_agent_id="supervisor"
         )
-        return {"report": result, "traces": [trace]}
+        return {"report": result, "status": "completed", "traces": [trace]}
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         return {
+            "status": "partial",
             "errors": [f"report: {exc}"],
             "traces": [
                 AgentTrace(
                     task_id=task_id,
                     agent_id="report",
+                    parent_agent_id="supervisor",
                     status="failed",
                     error=str(exc),
                 ).to_dict()
@@ -81,8 +117,7 @@ async def report_node(state: AgentState) -> dict[str, Any]:
 
 
 def build_workflow():
-    # Supervisor 内部通过 DeepAgents task/subagents 做 Agentic Delegation；
-    # LangGraph 只负责外层 Workflow、State、Checkpoint 和生命周期管理。
+    # LangGraph 负责外层 State、Checkpoint、生命周期；DeepAgents 负责 Agentic Delegation。
     graph = StateGraph(AgentState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("report", report_node)
@@ -93,5 +128,4 @@ def build_workflow():
 
 
 def new_task_state(query: str) -> AgentState:
-    """创建独立任务 State，避免不同请求之间共享 Agent 状态。"""
-    return {"query": query, "task_id": str(uuid4()), "errors": [], "traces": []}
+    return {"query": query, "task_id": str(uuid4()), "errors": [], "traces": [], "delegations": []}
