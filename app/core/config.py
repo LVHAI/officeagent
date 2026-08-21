@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_model: str = "gpt-4o-mini"
     embedding_model: str = "text-embedding-3-small"
+    tavily_api_key: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
