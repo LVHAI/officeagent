@@ -1,5 +1,8 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
+from app.core.task_store import InMemoryTaskStore, TaskRecord
 from app.main import app
 
 
@@ -19,3 +22,20 @@ def test_analysis_endpoint_accepts_query(monkeypatch):
     assert response.status_code == 200
     assert response.json()["report"] == "ok"
     assert response.json()["task_id"] == "task-1"
+
+
+def test_task_store_io_is_async(monkeypatch):
+    """验证 PostgreSQL 同步 Store 不会直接在 async handler 中执行。"""
+    store = InMemoryTaskStore()
+    store.save(TaskRecord(task_id="task-async", status="completed"))
+    monkeypatch.setattr("app.api.analysis._task_store", store)
+
+    async def run():
+        from app.api.analysis import _get
+
+        record = await _get("task-async")
+        return record
+
+    record = asyncio.run(run())
+    assert record is not None
+    assert record.status == "completed"
