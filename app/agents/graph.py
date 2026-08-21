@@ -28,10 +28,12 @@ class AgentState(TypedDict, total=False):
     traces: list[dict[str, Any]]
 
 
+# 单个 Agent 的超时时间；避免某一个外部模型调用长期占用整个任务。
 AGENT_TIMEOUT_SECONDS = 45.0
 
 
 async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, dict[str, Any]]:
+    # 每次 Agent 调用都建立独立 Trace，便于后续定位慢调用和失败节点。
     trace = AgentTrace(task_id=task_id, agent_id=agent_id)
     try:
         result = await run_with_timeout(
@@ -46,6 +48,7 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, 
 
 
 async def supervisor_node(state: AgentState) -> dict:
+    # Supervisor 负责理解任务和规划，不直接承担所有业务查询。
     task_id = str(uuid4())
     result, trace = await _invoke(create_supervisor(), state["query"], "supervisor", task_id)
     messages = result.get("messages", []) if isinstance(result, dict) else []
@@ -54,6 +57,7 @@ async def supervisor_node(state: AgentState) -> dict:
 
 
 async def worker_node(state: AgentState) -> dict:
+    # 三类独立任务并发执行，降低多个 Agent 串行调用造成的整体延迟。
     task_id = str(uuid4())
     agents = {
         "knowledge": create_knowledge_agent(),
@@ -69,6 +73,7 @@ async def worker_node(state: AgentState) -> dict:
     traces = list(state.get("traces", []))
     for name, result in zip(agents, results):
         if isinstance(result, Exception):
+            # 单个 Agent 失败只记录 Partial Failure，不影响其他独立 Agent 的结果。
             errors.append(f"{name}: {result}")
             traces.append(
                 AgentTrace(task_id=task_id, agent_id=name, status="failed", error=str(result)).to_dict()
@@ -83,6 +88,7 @@ async def worker_node(state: AgentState) -> dict:
 
 
 async def report_node(state: AgentState) -> dict:
+    # Report Agent 只负责汇总已经获取的数据，并保留失败信息和来源。
     task_id = str(uuid4())
     context = {
         "query": state["query"],
@@ -97,6 +103,7 @@ async def report_node(state: AgentState) -> dict:
 
 
 def build_workflow():
+    # LangGraph 负责状态和流程控制；具体 Multi-Agent Runtime 由 DeepAgents 提供。
     graph = StateGraph(AgentState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("workers", worker_node)
