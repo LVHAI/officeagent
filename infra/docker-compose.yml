@@ -36,6 +36,11 @@ services:
       - --data-dir=/etcd
     volumes:
       - etcd-data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   minio:
     image: minio/minio:latest
@@ -48,6 +53,11 @@ services:
       - "9001:9001"
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   milvus:
     image: milvusdb/milvus:v2.6.1
@@ -57,9 +67,9 @@ services:
       MINIO_ADDRESS: minio:9000
     depends_on:
       etcd:
-        condition: service_started
+        condition: service_healthy
       minio:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "19530:19530"
       - "9091:9091"
@@ -78,6 +88,11 @@ services:
       SERVICE_NAME: crm
     ports:
       - "8101:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   database-mcp:
     build:
@@ -86,6 +101,11 @@ services:
       SERVICE_NAME: database
     ports:
       - "8102:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   knowledge-mcp:
     build:
@@ -94,6 +114,11 @@ services:
       SERVICE_NAME: knowledge
     ports:
       - "8103:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   report-mcp:
     build:
@@ -102,6 +127,11 @@ services:
       SERVICE_NAME: report
     ports:
       - "8104:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   postgres-data:
