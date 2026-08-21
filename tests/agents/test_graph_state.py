@@ -3,6 +3,7 @@ from unittest.mock import patch
 import pytest
 
 from app.agents.graph import build_workflow, new_task_state
+from app.core.config import settings
 
 
 class FakeAgent:
@@ -14,7 +15,8 @@ class FakeAgent:
 
 
 @pytest.mark.asyncio
-async def test_workflow_preserves_task_state_and_report():
+async def test_workflow_preserves_task_state_and_report(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "test")
     with patch("app.agents.graph.create_supervisor", return_value=FakeAgent({"messages": ["knowledge-agent"]})), patch(
         "app.agents.graph.create_report_agent", return_value=FakeAgent({"structured_response": {"summary": "ok"}})
     ):
