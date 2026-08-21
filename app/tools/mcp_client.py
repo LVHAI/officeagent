@@ -24,17 +24,20 @@ class MCPClient:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
-        async def open_session():
-            return streamable_http_client(self.server.url)
-
-        async with await retry_async(open_session, retries=2) as (read, write, _):
+        async with streamable_http_client(self.server.url) as (read, write, _):
             async with ClientSession(read, write) as client:
-                await asyncio.wait_for(client.initialize(), timeout=self.server.timeout_seconds)
+                await retry_async(
+                    lambda: asyncio.wait_for(client.initialize(), timeout=self.server.timeout_seconds),
+                    retries=2,
+                )
                 yield client
 
     async def list_tools(self) -> list[dict[str, Any]]:
         async with self.session() as client:
-            result = await asyncio.wait_for(client.list_tools(), timeout=self.server.timeout_seconds)
+            result = await retry_async(
+                lambda: asyncio.wait_for(client.list_tools(), timeout=self.server.timeout_seconds),
+                retries=2,
+            )
             return [
                 {
                     "name": tool.name,
@@ -47,7 +50,10 @@ class MCPClient:
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         async with self.session() as client:
-            return await asyncio.wait_for(
-                client.call_tool(name, arguments or {}),
-                timeout=self.server.timeout_seconds,
+            return await retry_async(
+                lambda: asyncio.wait_for(
+                    client.call_tool(name, arguments or {}),
+                    timeout=self.server.timeout_seconds,
+                ),
+                retries=2,
             )
