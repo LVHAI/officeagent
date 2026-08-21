@@ -1,5 +1,5 @@
 from app.rag.models import DocumentChunk, RetrievalResult
-from app.rag.reranker import Reranker
+from app.rag.rerank import Reranker
 
 
 def test_reranker_prioritizes_exact_query_terms():
