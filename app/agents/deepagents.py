@@ -6,17 +6,17 @@ from deepagents import create_deep_agent
 from langchain.agents import create_agent
 from langchain_tavily import TavilySearch
 
+from app.agents.report_models import AnalysisReport
 from app.agents.model import build_chat_model
 from app.core.config import settings
 
 
-# Supervisor 负责全局任务拆解和 Agent 委派；专业 Agent 不共享全部工具上下文。
 SUPERVISOR_PROMPT = """
 You are the Supervisor Agent for an enterprise intelligence platform.
-Understand the user's intent, create an execution plan, delegate independent
-work to specialized subagents, and produce a source-aware final answer.
-Use the task delegation capability to select only the specialists required by
-the request. Prefer parallel independent work and preserve partial results.
+Understand the user's intent, create an execution plan, and delegate independent
+work to the minimum required specialized subagents. You may delegate to multiple
+subagents when their work is independent. Preserve partial results when a
+subagent fails and never fabricate missing evidence. Return source-aware results.
 """.strip()
 
 KNOWLEDGE_PROMPT = """
@@ -26,10 +26,10 @@ source metadata such as document, page, section, article, and chunk identifiers.
 """.strip()
 
 TOOL_PROMPT = """
-You are the Tool Agent. Use dynamically discovered MCP skills and tools to
-query enterprise systems. Select the minimum tools required for the task,
+You are the Tool Agent. Use dynamically discovered MCP skills and tools to query
+enterprise systems. Select the minimum tools required, validate tool inputs,
 never fabricate tool results, and preserve system, tool, request and execution
-metadata in your result.
+metadata. Retry transient failures only within the configured reliability policy.
 """.strip()
 
 WEB_PROMPT = """
@@ -40,13 +40,13 @@ titles, and retrieval timestamps.
 
 REPORT_PROMPT = """
 You are the Report Agent. Aggregate validated outputs from other agents,
-separate facts from recommendations, preserve source citations, and produce a
-concise executive-ready report.
+separate facts from recommendations, preserve citations, and explicitly list
+partial or failed agent results. Never invent evidence.
 """.strip()
 
 
 def build_tavily_search() -> Any:
-    """创建 Web Agent 专用 Tavily 工具，避免把 Web Tool 暴露给 Supervisor。"""
+    """创建 Web Agent 专用 Tavily 工具，避免把 Web Tool 暴露给其他 Agent。"""
     return TavilySearch(
         max_results=5,
         topic="general",
@@ -56,7 +56,7 @@ def build_tavily_search() -> Any:
 
 def create_supervisor():
     model = build_chat_model()
-    # DeepAgents 的 task/subagent 能力负责 Agentic Delegation；LangGraph 负责外层状态和执行。
+    # Supervisor 使用 DeepAgents 的 task/subagents 完成真正的 Agentic Delegation。
     return create_deep_agent(
         model=model,
         system_prompt=SUPERVISOR_PROMPT,
@@ -87,7 +87,6 @@ def create_supervisor():
 
 
 def create_knowledge_agent(tools=None):
-    # RAG 流程保持确定性，不为了“Agent”概念额外引入 DeepAgents Loop。
     return create_agent(
         model=build_chat_model(),
         tools=tools or [],
@@ -96,17 +95,15 @@ def create_knowledge_agent(tools=None):
 
 
 def create_tool_agent(tools=None):
-    # Tool Agent 需要动态选择 MCP Tool 并进行多步工具编排，因此使用 DeepAgents。
+    # Tool Agent 需要多步 MCP Tool Planning，因此使用 DeepAgents，但工具仍动态注入。
     return create_deep_agent(
         model=build_chat_model(),
         tools=tools or [],
         system_prompt=TOOL_PROMPT,
-        skills=["./skills/sql"],
     )
 
 
 def create_web_agent(tools=None):
-    # Web Agent 只暴露 Tavily，保持搜索流程简单、可测试、可替换。
     web_tools = tools if tools is not None else [build_tavily_search()]
     return create_agent(
         model=build_chat_model(),
@@ -116,9 +113,10 @@ def create_web_agent(tools=None):
 
 
 def create_report_agent():
-    # 报告生成使用普通 Agent Runtime，后续可通过 response_format 增加结构化输出。
+    # Report Agent 使用普通 Agent Runtime，并强制输出 AnalysisReport 结构。
     return create_agent(
         model=build_chat_model(),
         tools=[],
         system_prompt=REPORT_PROMPT,
+        response_format=AnalysisReport,
     )
