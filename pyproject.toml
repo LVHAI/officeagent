@@ -12,6 +12,7 @@ dependencies = [
   "mcp>=1.12,<2",
   "pydantic-settings>=2.10,<3",
   "pymilvus>=2.6,<3",
+  "rank-bm25>=0.2,<1",
   "redis>=6,<7",
   "uvicorn[standard]>=0.35,<1",
 ]
