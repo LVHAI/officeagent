@@ -1,0 +1,36 @@
+[project]
+name = "officeagent"
+version = "0.1.0"
+description = "Enterprise Intelligence Decision Agent Platform"
+requires-python = ">=3.12"
+dependencies = [
+  "deepagents>=0.0.10",
+  "fastapi>=0.116,<1",
+  "langchain>=0.3,<1",
+  "langchain-openai>=0.3,<1",
+  "langgraph>=0.6,<1",
+  "mcp>=1.12,<2",
+  "pydantic-settings>=2.10,<3",
+  "pymilvus>=2.6,<3",
+  "redis>=6,<7",
+  "uvicorn[standard]>=0.35,<1",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx>=0.28,<1",
+  "pytest>=8,<9",
+  "pytest-asyncio>=1,<2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
