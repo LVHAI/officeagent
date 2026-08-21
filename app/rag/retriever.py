@@ -21,12 +21,36 @@ class HybridRetriever:
         # 同时支持英文单词和中文单字，保证基础 BM25 对中英文企业文档都可用。
         return re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", text.lower())
 
-    def bm25(self, query: str, limit: int = 50) -> list[RetrievalResult]:
+    def bm25(
+        self,
+        query: str,
+        limit: int = 50,
+        metadata_filter: dict[str, str] | None = None,
+    ) -> list[RetrievalResult]:
+        """执行关键词检索，并在排序前应用元数据过滤。"""
         if not self._bm25:
             return []
+
         scores = self._bm25.get_scores(self._tokens(query))
-        ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)[:limit]
-        return [RetrievalResult(self.chunks[i], float(score), "bm25") for i, score in ranked]
+        ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
+        results: list[RetrievalResult] = []
+        for index, score in ranked:
+            chunk = self.chunks[index]
+            if metadata_filter and not self._matches_metadata(chunk, metadata_filter):
+                continue
+            results.append(RetrievalResult(chunk, float(score), "bm25"))
+            if len(results) >= limit:
+                break
+        return results
+
+    @staticmethod
+    def _matches_metadata(chunk: DocumentChunk, metadata_filter: dict[str, str]) -> bool:
+        """严格匹配文档 metadata；不存在的字段视为不匹配。"""
+        metadata = getattr(chunk, "metadata", None) or {}
+        for key, expected in metadata_filter.items():
+            if str(metadata.get(key)) != str(expected):
+                return False
+        return True
 
     @staticmethod
     def merge_and_rerank(routes: Sequence[Sequence[RetrievalResult]], limit: int = 5) -> list[RetrievalResult]:
