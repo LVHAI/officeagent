@@ -5,6 +5,7 @@ from datetime import datetime
 
 import psycopg
 
+from app.core.audit import AuditEvent
 from app.core.config import Settings, settings
 from app.core.task_store import TaskRecord
 
@@ -30,6 +31,21 @@ class PostgresTaskStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_audit_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    payload JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_agent_audit_task_id ON agent_audit_events(task_id)"
+            )
             conn.commit()
 
     def save(self, record: TaskRecord) -> None:
@@ -50,6 +66,24 @@ class PostgresTaskStore:
                     json.dumps(record.result) if record.result is not None else None,
                     record.error,
                     record.updated_at,
+                ),
+            )
+            conn.commit()
+
+    def append_audit(self, event: AuditEvent) -> None:
+        """写入 Agent/MCP 审计事件；payload 统一存 JSONB 便于后续检索。"""
+        with psycopg.connect(self.dsn) as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_audit_events(task_id, event_type, actor, payload, created_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    event.task_id,
+                    event.event_type,
+                    event.actor,
+                    json.dumps(event.payload),
+                    event.created_at,
                 ),
             )
             conn.commit()
