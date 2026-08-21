@@ -8,7 +8,7 @@ from app.agents.mcp_client import MCPClient, MCPTool
 
 @dataclass(frozen=True)
 class Skill:
-    """Skill 元数据；只描述能力边界，不把所有 MCP Schema 注入 Agent Context。"""
+    """Skill 元数据；只描述能力边界，不把全部 MCP Schema 注入 Context。"""
 
     name: str
     description: str
@@ -29,9 +29,27 @@ class SkillRegistry:
             raise KeyError(f"Unknown skill: {name}") from exc
 
     def select_tools(self, skill_name: str, tools: list[MCPTool]) -> list[MCPTool]:
-        skill = self.get(skill_name)
-        allowed = set(skill.tool_names)
+        allowed = set(self.get(skill_name).tool_names)
         return [tool for tool in tools if tool.name in allowed]
+
+    def route(self, task: str) -> list[Skill]:
+        """轻量 Skill Router；生产环境可替换为模型分类器，但仍受 Registry 白名单约束。"""
+        text = task.lower()
+        matches = []
+        for skill in self._skills.values():
+            keywords = {skill.name.lower(), *skill.description.lower().split()}
+            if any(keyword in text for keyword in keywords if len(keyword) > 2):
+                matches.append(skill)
+        return matches
+
+
+DEFAULT_SKILLS = SkillRegistry(
+    [
+        Skill("sales", "销售 客户 CRM ERP", ("customer_query", "sales_summary")),
+        Skill("knowledge", "知识库 文档 Knowledge", ("knowledge_search",)),
+        Skill("report", "报告 Report", ("report_generate",)),
+    ]
+)
 
 
 async def discover_skill_tools(
