@@ -1,3 +1,4 @@
+from asyncio import to_thread
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
@@ -34,9 +35,19 @@ def configure_task_store(store: TaskStore) -> None:
     _task_store = store
 
 
+async def _save(record: TaskRecord) -> None:
+    # psycopg 是同步驱动，放入线程池避免阻塞 Agent 的事件循环。
+    await to_thread(_task_store.save, record)
+
+
+async def _get(task_id: str) -> TaskRecord | None:
+    awaitable = to_thread(_task_store.get, task_id)
+    return await awaitable
+
+
 async def run_analysis(query: str) -> dict:
     task_id = str(uuid4())
-    _task_store.save(TaskRecord(task_id=task_id, status="running"))
+    await _save(TaskRecord(task_id=task_id, status="running"))
     try:
         # task_id 同时作为 LangGraph checkpoint 的 thread_id，贯穿整个执行链路。
         result = await _get_workflow().ainvoke(
@@ -52,11 +63,11 @@ async def run_analysis(query: str) -> dict:
             "traces": result.get("traces", []),
         }
         status = "failed" if response["errors"] else "completed"
-        _task_store.save(TaskRecord(task_id=task_id, status=status, result=response))
+        await _save(TaskRecord(task_id=task_id, status=status, result=response))
         return response
     except Exception as exc:
         # 失败状态先落库，调用方可以通过任务查询接口定位失败原因。
-        _task_store.save(TaskRecord(task_id=task_id, status="failed", error=str(exc)))
+        await _save(TaskRecord(task_id=task_id, status="failed", error=str(exc)))
         raise
 
 
@@ -69,7 +80,7 @@ async def analyze(request: AnalyzeRequest) -> dict:
 @router.get("/tasks/{task_id}")
 async def get_task(task_id: str) -> dict:
     """查询任务状态；本地开发默认使用 PostgreSQL，测试可注入内存实现。"""
-    record = _task_store.get(task_id)
+    record = await _get(task_id)
     if record is None:
         raise HTTPException(status_code=404, detail="task not found")
     return {
