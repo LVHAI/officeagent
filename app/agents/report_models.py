@@ -17,7 +17,7 @@ class ReportSource(BaseModel):
 
 class AnalysisReport(BaseModel):
     summary: str
-    findings: list[ReportFinding] = []
-    recommendations: list[str] = []
-    sources: list[ReportSource] = []
-    partial_results: list[str] = []
+    findings: list[ReportFinding] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    sources: list[ReportSource] = Field(default_factory=list)
+    partial_results: list[str] = Field(default_factory=list)
