@@ -22,7 +22,10 @@ class AgentTrace:
         self.end_time = datetime.now(timezone.utc)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        if self.end_time is not None:
+            data["duration_ms"] = int((self.end_time - self.start_time).total_seconds() * 1000)
+        return data
 
 
 @dataclass(frozen=True)
@@ -32,3 +35,6 @@ class ToolSource:
     tool: str
     request_id: str | None = None
     execution_time_ms: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
