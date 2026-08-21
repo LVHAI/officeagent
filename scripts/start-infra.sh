@@ -17,9 +17,13 @@ docker compose -f "$COMPOSE_FILE" up -d
 
 echo "Waiting for infrastructure services to become healthy..."
 for i in $(seq 1 60); do
-  postgres_health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' officeagent-postgres-1 2>/dev/null || true)
-  redis_health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' officeagent-redis-1 2>/dev/null || true)
-  milvus_health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' officeagent-milvus-1 2>/dev/null || true)
+  postgres_id=$(docker compose -f "$COMPOSE_FILE" ps -q postgres)
+  redis_id=$(docker compose -f "$COMPOSE_FILE" ps -q redis)
+  milvus_id=$(docker compose -f "$COMPOSE_FILE" ps -q milvus)
+
+  postgres_health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$postgres_id" 2>/dev/null || true)
+  redis_health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$redis_id" 2>/dev/null || true)
+  milvus_health=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' "$milvus_id" 2>/dev/null || true)
 
   mcp_running=$(docker compose -f "$COMPOSE_FILE" ps --status running --services | grep -E '^(crm-mcp|database-mcp|knowledge-mcp|report-mcp)$' | wc -l | tr -d ' ')
 
