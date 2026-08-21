@@ -10,6 +10,8 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.contracts import DelegationTrace
 from app.agents.deepagents import create_report_agent, create_supervisor
+from app.core.checkpoint import get_checkpointer
+from app.core.config import settings
 from app.core.execution import run_with_timeout
 from app.core.trace import AgentTrace
 
@@ -65,7 +67,6 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     try:
         result, trace = await _invoke(create_supervisor(), state["query"], "supervisor", task_id)
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
-        # Delegation 的具体选择由 DeepAgents task 工具决定；这里保留统一审计事件。
         delegations = [
             _delegation(task_id, name, "completed", elapsed_ms=elapsed)
             for name in ("knowledge-agent", "tool-agent", "web-agent")
@@ -85,7 +86,6 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
 
 
 async def report_node(state: AgentState) -> dict[str, Any]:
-    """聚合 Supervisor 结果、错误和 Delegation Trace，并生成结构化报告。"""
     task_id = state["task_id"]
     context = {
         "query": state["query"],
@@ -117,14 +117,15 @@ async def report_node(state: AgentState) -> dict[str, Any]:
 
 
 def build_workflow():
-    # LangGraph 负责外层 State、Checkpoint、生命周期；DeepAgents 负责 Agentic Delegation。
+    """LangGraph 负责外层 State/Checkpoint；测试环境仍使用 InMemorySaver。"""
     graph = StateGraph(AgentState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("report", report_node)
     graph.add_edge(START, "supervisor")
     graph.add_edge("supervisor", "report")
     graph.add_edge("report", END)
-    return graph.compile(checkpointer=InMemorySaver())
+    checkpointer = InMemorySaver() if settings.environment == "test" else get_checkpointer()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def new_task_state(query: str) -> AgentState:
