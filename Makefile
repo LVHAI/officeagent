@@ -1,7 +1,7 @@
 .PHONY: infra-up infra-down infra-logs infra-status infra-reset dev test lint
 
 infra-up:
-	./scripts/start-infra.sh
+	bash scripts/start-infra.sh
 
 infra-down:
 	docker compose -f infra/docker-compose.yml down
