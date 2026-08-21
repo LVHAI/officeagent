@@ -19,8 +19,12 @@ class RetrievalPipeline:
         limit: int = 5,
         metadata_filter: dict[str, str] | None = None,
     ) -> list[RetrievalResult]:
-        # 当前基础实现使用 BM25；向量检索结果可通过 routes 直接接入同一个合并入口。
-        lexical = self.retriever.bm25(query, limit=max(limit * 10, 20), metadata_filter=metadata_filter)
+        # 当前基础实现使用 BM25；Milvus 向量检索结果后续接入同一个 routes 合并入口。
+        lexical = self.retriever.bm25(
+            query,
+            limit=max(limit * 10, 20),
+            metadata_filter=metadata_filter,
+        )
         return self.retriever.merge_and_rerank([lexical], limit=limit)
 
     @staticmethod
@@ -35,6 +39,11 @@ class RetrievalPipeline:
 
     @staticmethod
     def _format_source(source: Source) -> str:
-        parts = [source.document, f"page={source.page}" if source.page is not None else None,
-                 source.section, source.article, f"chunk={source.chunk_id}" if source.chunk_id else None]
+        parts = [
+            source.document,
+            f"page={source.page}" if source.page is not None else None,
+            source.section,
+            source.article,
+            f"chunk={source.chunk_id}" if source.chunk_id else None,
+        ]
         return " | ".join(part for part in parts if part) or "source=unknown"
