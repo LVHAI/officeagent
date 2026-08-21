@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, TypedDict
+import operator
+from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
@@ -24,8 +25,9 @@ class AgentState(TypedDict, total=False):
     tool: Any
     web: Any
     report: Any
-    errors: list[str]
-    traces: list[dict[str, Any]]
+    # LangGraph 使用 reducer 合并不同节点产生的 Trace / Error，避免后一个节点覆盖前一个节点。
+    errors: Annotated[list[str], operator.add]
+    traces: Annotated[list[dict[str, Any]], operator.add]
 
 
 # 单个 Agent 的超时时间；避免某一个外部模型调用长期占用整个任务。
@@ -69,8 +71,8 @@ async def worker_node(state: AgentState) -> dict:
         return_exceptions=True,
     )
     output: dict[str, Any] = {}
-    errors = list(state.get("errors", []))
-    traces = list(state.get("traces", []))
+    errors: list[str] = []
+    traces: list[dict[str, Any]] = []
     for name, result in zip(agents, results):
         if isinstance(result, Exception):
             # 单个 Agent 失败只记录 Partial Failure，不影响其他独立 Agent 的结果。
