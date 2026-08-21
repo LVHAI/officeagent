@@ -6,28 +6,122 @@
 
 核心技术基线：
 
-- LangChain DeepAgents：Multi-Agent Runtime
-- LangGraph：Workflow / State / Checkpoint / 并行编排
+- LangChain DeepAgents：Supervisor / Tool Agent Runtime
+- LangGraph：Workflow / State / Checkpoint / Persistence / 并行编排
 - FastAPI：Backend API
 - Milvus：Vector Database
 - MCP：企业工具接入协议
 - PostgreSQL：业务数据与 Agent 状态持久化
 - Redis：缓存、会话及任务协调
+- Tavily：Web Agent 搜索工具
+
+### 关键架构原则
+
+**LangGraph 是整个 Multi-Agent 系统的 Workflow / State / Persistence / 并行编排层；DeepAgents 是部分 Agent 的 Runtime，而不是所有 Agent 的统一创建方式。**
+
+系统使用 `create_deep_agent()` 创建核心 `SUPERVISOR_AGENT`。Supervisor 负责理解任务、规划任务，并决定调用一个或多个专业子 Agent。
+
+专业子 Agent 根据职责选择最合适的实现方式：
+
+- Knowledge Agent：普通 LangGraph Agent Node + RAG Pipeline，不强制使用 `create_deep_agent()`。
+- Tool Agent：使用 `create_deep_agent()`，负责 Skill / MCP Tool 的动态选择和复杂工具编排。
+- Web Agent：普通 Agent Node / ReAct Agent + Tavily Tool，不强制使用 `create_deep_agent()`。
+- Report Agent：Structured Output / 普通 Agent Node，负责最终报告生成，不强制使用 `create_deep_agent()`。
+
+目标架构：
+
+```text
+                         LangGraph
+                            │
+                            ▼
+                  ┌────────────────────┐
+                  │  SUPERVISOR_AGENT  │
+                  │ create_deep_agent  │
+                  └─────────┬──────────┘
+                            │
+                 Task Planning / Delegation
+                            │
+          ┌─────────────────┼─────────────────┐
+          │                 │                 │
+          ▼                 ▼                 ▼
+   Knowledge Agent      Tool Agent        Web Agent
+      RAG Node        create_deep_agent     Tavily
+          │                 │                 │
+     Milvus/BM25          MCP/Skill          Search
+          │                 │                 │
+          └─────────────────┼─────────────────┘
+                            ▼
+                     Result Aggregation
+                            │
+                            ▼
+                      Report Agent
+                            │
+                            ▼
+                  Final Answer + Sources
+```
+
+Supervisor 可以根据任务动态选择一个或多个子 Agent：
+
+```text
+简单知识问题
+  → Knowledge Agent
+
+企业数据查询
+  → Tool Agent
+
+最新外部信息
+  → Web Agent
+
+复杂企业分析
+  → Knowledge + Tool + Web 并行/串行组合
+```
+
+**不是所有任务都需要调用所有 Agent，也不是所有 Agent 都需要 DeepAgents。**
+
+### Supervisor Delegation 原则
+
+`SUPERVISOR_AGENT` 是真正的 Multi-Agent 决策中心，而不是简单的 LangGraph Router。
+
+Supervisor 必须能够：
+
+- 理解用户目标
+- 分解任务
+- 判断需要哪些专业 Agent
+- 委派一个或多个子 Agent
+- 根据子 Agent 返回结果继续委派
+- 判断是否可以并行执行
+- 处理 Partial Result
+- 在必要时重新 Delegation
+- 最终形成可交付的分析上下文
+
+LangGraph 不替代 Supervisor 的 Agentic Planning；LangGraph 负责执行 Supervisor 决策、维护 State、Checkpoint、并发和恢复。
+
+```text
+User
+  ↓
+LangGraph Workflow
+  ↓
+SUPERVISOR_AGENT (DeepAgent)
+  ↓
+Planning / Delegation
+  ├── Knowledge Agent
+  ├── Tool Agent (DeepAgent)
+  └── Web Agent (Tavily)
+  ↓
+Result Aggregation
+  ↓
+Report Agent
+  ↓
+Final Answer
+```
 
 ### 运行原则
 
 **当前开发环境不运行在 Docker 中。**
 
-Backend、DeepAgents、LangGraph、RAG 等核心代码直接运行在 Mac 本机，便于：
+Backend、DeepAgents、LangGraph、RAG 等核心代码直接运行在 Mac 本机，便于 IDE Debug、Python Debugger、Agent Step-by-Step 调试和 LangGraph State 调试。
 
-- IDE 调试
-- Python Debugger
-- 单元测试
-- Agent Step-by-Step 调试
-- LangGraph 状态调试
-- 热重载
-
-Docker Compose 只负责启动当前项目依赖的**外部基础设施和模拟企业系统**，例如 PostgreSQL、Redis、Milvus、MinIO、MCP Server 等。
+Docker Compose 只负责启动当前项目依赖的外部基础设施和模拟企业系统，例如 PostgreSQL、Redis、Milvus、MinIO、MCP Server 等。
 
 ---
 
@@ -44,13 +138,13 @@ Mac
 │
 ├── Backend（本机）
 │   ├── FastAPI
-│   ├── DeepAgents
+│   ├── SUPERVISOR_AGENT / DeepAgents
 │   ├── LangGraph
 │   ├── RAG
+│   ├── Tool Agent / DeepAgents
 │   └── MCP Client
 │
 └── Docker Desktop
-    │
     ├── PostgreSQL
     ├── Redis
     ├── Milvus
@@ -149,31 +243,13 @@ make infra-status
 
 启动脚本必须等待依赖真正 Ready 后再返回成功，不能仅依赖容器启动状态。
 
-重点检查：
-
-- PostgreSQL connection
-- Redis connection
-- Milvus connection
-- MCP Server availability
-- MinIO availability
+重点检查：PostgreSQL、Redis、Milvus、MCP Server、MinIO。
 
 ## 2.6 Docker 数据持久化
 
-使用 Docker volumes 保存：
+使用 Docker volumes 保存 PostgreSQL、Milvus、MinIO 数据。
 
-- PostgreSQL data
-- Milvus data
-- MinIO data
-
-默认 `docker compose down` 不删除数据。
-
-提供独立清理命令：
-
-```bash
-make infra-reset
-```
-
-明确删除本地开发数据，避免误删。
+默认 `docker compose down` 不删除数据。提供独立的 `make infra-reset` 明确删除本地开发数据，避免误删。
 
 ---
 
@@ -190,6 +266,7 @@ Backend 不进入 Docker。
 - LangGraph
 - MCP SDK
 - RAG dependencies
+- Tavily integration
 
 提供：
 
@@ -197,13 +274,7 @@ Backend 不进入 Docker。
 make dev
 ```
 
-启动本机 FastAPI，并支持：
-
-- Hot Reload
-- IDE Debug
-- Python Debugger
-- Agent breakpoint
-- LangGraph state inspection
+启动本机 FastAPI，并支持 Hot Reload、IDE Debug、Python Debugger、Agent breakpoint 和 LangGraph state inspection。
 
 配置通过 `.env` 指向 Docker 服务：
 
@@ -218,63 +289,139 @@ MILVUS_PORT=19530
 
 ---
 
-# 4. Phase 2：DeepAgents Multi-Agent Runtime
+# 4. Phase 2：Multi-Agent Runtime
 
-使用 **LangChain DeepAgents** 作为 Multi-Agent 核心框架。
+## 4.1 SUPERVISOR_AGENT
 
-实现：
+使用 **LangChain DeepAgents `create_deep_agent()` 创建 `SUPERVISOR_AGENT`**。
 
-- Supervisor DeepAgent
-- Knowledge Agent
-- Tool Agent
-- Web Agent
-- Report Agent
+Supervisor 是整个 Multi-Agent 系统的核心 Agent Runtime，负责：
+
+- 理解用户任务
+- Task Planning
+- 判断需要哪些专业能力
 - Agent Delegation
-- Planning
-- Skills
-- Tool Calling
-- Agent Memory
+- 决定调用一个还是多个子 Agent
+- 决定执行顺序
+- 判断可并行任务
+- 处理子 Agent 返回结果
+- 必要时继续 Delegation
+- 处理 Partial Result
+- 汇总最终上下文
 
-职责划分：
+Supervisor 不应把所有 MCP Tools、RAG Tools、Tavily Tools 直接注入自身 Context；专业能力通过子 Agent Delegation 暴露。
+
+## 4.2 Knowledge Agent
+
+Knowledge Agent 使用普通 LangGraph Agent Node / 明确的 Agent Runtime，不强制使用 `create_deep_agent()`。
+
+职责：
+
+- Query Rewrite
+- 企业知识库检索
+- BM25
+- Milvus
+- Reranker
+- Citation
+
+Knowledge Agent 的检索流程尽量保持确定性，避免为了使用 DeepAgents 而增加不必要的 Agentic Loop。
+
+## 4.3 Tool Agent
+
+Tool Agent 使用 `create_deep_agent()`。
+
+职责：
+
+- Skill Selection
+- Dynamic MCP Tool Discovery
+- Tool Schema Loading
+- MCP Tool Selection
+- MCP Tool Invocation
+- Tool Result Interpretation
+
+Tool Agent 只加载当前 Skill 所需 MCP Tools，不把所有企业工具一次性注入 Context。
+
+## 4.4 Web Agent
+
+Web Agent 使用 Tavily Tool。
+
+默认不使用 `create_deep_agent()`；如果未来 Web 搜索需要复杂多步规划，再单独评估是否引入 DeepAgents。
+
+职责：
+
+- Web Search
+- Search Result Filtering
+- Evidence Extraction
+- URL / Source Tracking
+
+## 4.5 Report Agent
+
+Report Agent 默认使用普通 Agent Node + Structured Output，不强制使用 `create_deep_agent()`。
+
+职责：
+
+- 聚合 Knowledge / Tool / Web 结果
+- 生成结构化分析报告
+- 保留 Source / Citation
+- 处理 Partial Result
+
+## 4.6 Agent Contract
+
+所有子 Agent 必须通过统一 State Contract 与 Supervisor 通信：
 
 ```text
-User
- ↓
-Supervisor DeepAgent
- ↓
-Task Planning
- ↓
-Agent Delegation
- ├── Knowledge Agent
- ├── Tool Agent
- └── Web Agent
- ↓
-Result Aggregation
- ↓
-Report Agent
- ↓
-Final Answer
+AgentInput
+- task_id
+- parent_agent_id
+- query
+- context
+- constraints
+
+AgentOutput
+- agent_id
+- status
+- result
+- sources
+- errors
+- traces
+- elapsed_ms
 ```
+
+禁止通过隐式全局变量共享 Agent 状态。
 
 ---
 
 # 5. Phase 3：LangGraph Workflow / State
 
-LangGraph 不替代 DeepAgents，而负责底层 Workflow / State 能力。
+LangGraph 不替代 DeepAgents，而负责整个系统的 Workflow / State / Persistence / 并行编排。
 
 实现：
 
 - Workflow State
+- Supervisor ↔ Sub-Agent State
 - Agent execution state
 - Checkpoint
 - Persistence
 - Parallel execution
+- Conditional routing
 - Retry boundary
 - Timeout boundary
 - Human-in-the-loop
 - Failure recovery
 
-复杂任务允许 Knowledge / Tool / Web Agent 并行执行，避免串行等待。
+Supervisor 的 Agentic Delegation 与 LangGraph State 必须明确区分：
+
+```text
+Supervisor DeepAgent
+    ↓
+决定调用哪些子 Agent
+    ↓
+LangGraph
+    ↓
+执行 / 并发 / 持久化 / 恢复
+```
+
+复杂任务允许 Knowledge / Tool / Web Agent 并行执行，避免无依赖任务串行等待。
 
 ---
 
@@ -315,6 +462,8 @@ Top-K Context
 Citation-aware Answer
 ```
 
+Knowledge Agent 负责调用该 Pipeline，不需要为了使用 RAG 而创建 DeepAgent。
+
 ---
 
 # 7. Phase 5：MCP Tool Platform
@@ -338,6 +487,8 @@ Citation-aware Answer
 - Error Normalization
 - Tool Result Source Tracking
 
+MCP Tool 主要由 Tool Agent 使用。Supervisor 不直接依赖具体 MCP Tool 实现。
+
 ---
 
 # 8. Phase 6：Skill System
@@ -350,7 +501,9 @@ Citation-aware Answer
 - Dynamic Tool Loading
 - Skill-to-MCP mapping
 
-Agent 首先加载 Skill 能力描述，再按任务动态加载具体 MCP Tools，避免将全部 Tool Schema 注入 Context。
+Tool Agent 首先加载 Skill 能力描述，再按任务动态加载具体 MCP Tools，避免将全部 Tool Schema 注入 Context。
+
+Supervisor 只需要知道 Tool Agent 的能力边界，不需要知道每一个 MCP Tool 的底层 Schema。
 
 ---
 
@@ -374,6 +527,13 @@ Agent 首先加载 Skill 能力描述，再按任务动态加载具体 MCP Tools
 - request_id
 - execution_time
 
+Web 来源：
+
+- URL
+- title
+- source
+- retrieved_at
+
 Agent Trace：
 
 - task_id
@@ -385,6 +545,18 @@ Agent Trace：
 - error
 - token usage
 
+特别记录 Supervisor → Sub-Agent 的 Delegation Trace：
+
+```text
+Supervisor
+  ↓ delegate
+Knowledge Agent
+  ↓ result
+Supervisor
+  ↓ delegate
+Tool Agent
+```
+
 确保企业分析结果可以审计和追溯。
 
 ---
@@ -393,13 +565,15 @@ Agent Trace：
 
 ## 并发
 
-使用 async / await，并允许独立 Agent 并行执行。
+使用 async / await，并允许 Supervisor 委派的独立 Agent 并行执行。
 
 例如：
 
 ```text
-Supervisor
-    ↓
+Supervisor DeepAgent
+        ↓
+   Task Planning
+        ↓
  ┌───────────────┐
  │               │
 Knowledge     Tool        Web
@@ -439,7 +613,7 @@ Knowledge     Tool        Web
 - Partial Result
 - Cancellation
 
-一个 Agent 失败不能导致无依赖的其他 Agent 全部失败；Aggregator 必须能够处理 Partial Result。
+一个子 Agent 失败不能导致无依赖的其他 Agent 全部失败；Supervisor / Aggregator 必须能够处理 Partial Result，并决定是否需要重新 Delegation。
 
 ---
 
@@ -455,6 +629,7 @@ Knowledge     Tool        Web
 - Reranker
 - Skill Router
 - MCP Client
+- Tavily Web Agent Adapter
 - Error Handling
 
 ## Agent Test
@@ -462,8 +637,11 @@ Knowledge     Tool        Web
 测试：
 
 - Supervisor Planning
-- Agent Delegation
-- DeepAgents Tool Calling
+- Supervisor Agent Delegation
+- Knowledge Agent
+- Tool Agent + DeepAgents
+- Web Agent + Tavily
+- Report Agent Structured Output
 - Agent State
 - Checkpoint Recovery
 
@@ -482,6 +660,7 @@ Backend 仍然由测试进程在本机运行。
 
 测试：
 
+- Supervisor 并行 Delegation
 - 多 Agent 并行
 - MCP 并发调用
 - 超时
@@ -491,7 +670,21 @@ Backend 仍然由测试进程在本机运行。
 
 ## E2E Test
 
-验证完整流程：
+至少覆盖三类路径：
+
+### 单 Agent
+
+```text
+User
+ ↓
+Supervisor DeepAgent
+ ↓
+Knowledge Agent
+ ↓
+Final Answer
+```
+
+### 多 Agent 并行
 
 ```text
 User
@@ -507,6 +700,26 @@ Aggregation
 Report Agent
  ↓
 Final Answer + Sources
+```
+
+### Tool Agent
+
+```text
+User
+ ↓
+Supervisor
+ ↓
+Tool Agent DeepAgent
+ ↓
+Skill
+ ↓
+MCP Tool Discovery
+ ↓
+MCP Tool
+ ↓
+Result
+ ↓
+Supervisor
 ```
 
 ---
@@ -536,8 +749,13 @@ http://localhost:8000/docs
 - Intel Mac 可运行
 - Docker 仅运行外部依赖
 - Backend 可本机 Debug
-- DeepAgents Agent 可断点调试
+- Supervisor DeepAgent 可断点调试
 - LangGraph State 可调试
+- Supervisor 可以根据任务决定调用一个或多个子 Agent
+- Knowledge Agent 正常工作
+- Tool Agent + DeepAgents + MCP 正常工作
+- Web Agent + Tavily 正常工作
+- Report Agent 可以生成结构化报告
 - Milvus 正常工作
 - MCP Server 正常工作
 - 企业知识问答可运行
@@ -546,4 +764,5 @@ http://localhost:8000/docs
 - MCP Tool 可动态发现和调用
 - 自动生成分析报告
 - 全链路 Trace 可追踪
+- Supervisor Delegation 可审计
 - 服务异常可恢复
