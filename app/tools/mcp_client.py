@@ -19,11 +19,14 @@ class MCPServer:
 
 
 class MCPClient:
+    """MCP 客户端封装：统一处理连接初始化、超时和重试。"""
+
     def __init__(self, server: MCPServer) -> None:
         self.server = server
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[ClientSession]:
+        # 每次建立独立会话，避免不同 Agent 之间共享连接造成状态污染。
         async with streamable_http_client(self.server.url) as (read, write, _):
             async with ClientSession(read, write) as client:
                 await retry_async(
@@ -33,6 +36,7 @@ class MCPClient:
                 yield client
 
     async def list_tools(self) -> list[dict[str, Any]]:
+        # Tool Discovery 只返回 Agent 路由所需的元数据，不在这里执行工具。
         async with self.session() as client:
             result = await retry_async(
                 lambda: asyncio.wait_for(client.list_tools(), timeout=self.server.timeout_seconds),
@@ -49,6 +53,7 @@ class MCPClient:
             ]
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        # MCP 调用设置独立超时；下游异常交由统一 retry 策略处理。
         async with self.session() as client:
             return await retry_async(
                 lambda: asyncio.wait_for(
