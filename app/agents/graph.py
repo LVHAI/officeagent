@@ -14,7 +14,7 @@ from app.agents.deepagents import (
     create_tool_agent,
     create_web_agent,
 )
-from app.core.execution import run_with_timeout
+from app.core.execution import gather_bounded, run_with_timeout
 from app.core.trace import AgentTrace
 
 
@@ -32,10 +32,14 @@ class AgentState(TypedDict, total=False):
 
 # 单个 Agent 的超时时间；避免某一个外部模型调用长期占用整个任务。
 AGENT_TIMEOUT_SECONDS = 45.0
+# 一个任务最多同时运行 3 个 Worker；后续接入更多 Agent 时仍保持有界并发。
+MAX_WORKER_CONCURRENCY = 3
+# 整个 Worker 阶段的总超时，超时后会向未完成的子任务传播取消信号。
+WORKER_GLOBAL_TIMEOUT_SECONDS = 90.0
 
 
 async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, dict[str, Any]]:
-    # 每次 Agent 调用都建立独立 Trace，便于后续定位慢调用和失败节点。
+    # 每次 Agent 调用都建立独立 Trace，便于定位慢调用和失败节点。
     trace = AgentTrace(task_id=task_id, agent_id=agent_id)
     try:
         result = await run_with_timeout(
@@ -44,6 +48,9 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, 
         )
         trace.finish()
         return result, trace.to_dict()
+    except asyncio.CancelledError:
+        trace.finish(status="cancelled", error="agent task cancelled")
+        raise
     except Exception as exc:
         trace.finish(status="failed", error=str(exc))
         raise
@@ -58,23 +65,45 @@ async def supervisor_node(state: AgentState) -> dict:
     return {"plan": plan, "traces": [trace]}
 
 
-async def worker_node(state: AgentState) -> dict:
-    # 三类独立任务并发执行，降低多个 Agent 串行调用造成的整体延迟。
-    task_id = str(uuid4())
+async def _run_workers(state: AgentState, task_id: str) -> list[Any]:
+    # 三类独立任务并发执行，并通过 semaphore 控制最大并发度。
     agents = {
         "knowledge": create_knowledge_agent(),
         "tool": create_tool_agent(),
         "web": create_web_agent(),
     }
-    results = await asyncio.gather(
-        *(_invoke(agent, state["query"], name, task_id) for name, agent in agents.items()),
-        return_exceptions=True,
-    )
+    operations = [_invoke(agent, state["query"], name, task_id) for name, agent in agents.items()]
+    return await gather_bounded(operations, MAX_WORKER_CONCURRENCY)
+
+
+async def worker_node(state: AgentState) -> dict:
+    task_id = str(uuid4())
+    agents = {"knowledge": None, "tool": None, "web": None}
+    try:
+        results = await run_with_timeout(
+            _run_workers(state, task_id),
+            timeout=WORKER_GLOBAL_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        # 全局超时后主动取消尚未完成的 Worker，避免后台任务继续占用资源。
+        return {
+            "errors": ["workers: global timeout"],
+            "traces": [
+                AgentTrace(
+                    task_id=task_id,
+                    agent_id=name,
+                    status="timeout",
+                    error="worker global timeout",
+                ).to_dict()
+                for name in agents
+            ],
+        }
+
     output: dict[str, Any] = {}
     errors: list[str] = []
     traces: list[dict[str, Any]] = []
     for name, result in zip(agents, results):
-        if isinstance(result, Exception):
+        if isinstance(result, BaseException):
             # 单个 Agent 失败只记录 Partial Failure，不影响其他独立 Agent 的结果。
             errors.append(f"{name}: {result}")
             traces.append(
