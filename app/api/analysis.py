@@ -26,11 +26,13 @@ def _get_workflow():
 
 async def run_analysis(query: str) -> dict:
     # 每个请求使用独立 State；Graph 内部负责 Agent 并发和状态合并。
-    result = await _get_workflow().ainvoke({"query": query, "errors": []})
+    result = await _get_workflow().ainvoke({"query": query, "errors": [], "traces": []})
     return {
         "query": query,
         "report": result.get("report"),
         "errors": result.get("errors", []),
+        # Trace 用于企业审计，也方便本地调试 Agent 执行链路。
+        "traces": result.get("traces", []),
     }
 
 
