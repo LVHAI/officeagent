@@ -4,6 +4,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from app.core.reliability import CircuitBreaker, retry_async
+
 
 class MCPTransport(Protocol):
     async def list_tools(self) -> Any: ...
@@ -20,16 +22,27 @@ class MCPTool:
 
 
 class MCPClient:
-    """MCP Client 适配层：负责 discovery、调用、超时和错误归一化。"""
+    """MCP Client：Discovery/Invocation + timeout/retry/circuit-breaker。"""
 
-    def __init__(self, transport: MCPTransport, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        transport: MCPTransport,
+        timeout_seconds: float = 30.0,
+        retry_attempts: int = 3,
+        breaker: CircuitBreaker | None = None,
+    ) -> None:
         self.transport = transport
         self.timeout_seconds = timeout_seconds
+        self.retry_attempts = retry_attempts
+        self.breaker = breaker or CircuitBreaker()
 
     async def discover_tools(self) -> list[MCPTool]:
+        async def operation():
+            return await asyncio.wait_for(self.transport.list_tools(), timeout=self.timeout_seconds)
+
         try:
-            response = await asyncio.wait_for(
-                self.transport.list_tools(), timeout=self.timeout_seconds
+            response = await retry_async(
+                operation, attempts=self.retry_attempts, breaker=self.breaker
             )
             tools = getattr(response, "tools", response)
             return [
@@ -45,16 +58,23 @@ class MCPClient:
         except asyncio.TimeoutError as exc:
             raise MCPTimeoutError("MCP tool discovery timed out") from exc
         except Exception as exc:  # noqa: BLE001 - 边界层统一归一化第三方异常
+            if isinstance(exc, MCPError):
+                raise
             raise MCPError(f"MCP tool discovery failed: {exc}") from exc
 
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        try:
+        async def operation():
             return await asyncio.wait_for(
                 self.transport.call_tool(tool_name, arguments), timeout=self.timeout_seconds
             )
+
+        try:
+            return await retry_async(operation, attempts=self.retry_attempts, breaker=self.breaker)
         except asyncio.TimeoutError as exc:
             raise MCPTimeoutError(f"MCP tool invocation timed out: {tool_name}") from exc
         except Exception as exc:  # noqa: BLE001 - 边界层统一归一化第三方异常
+            if isinstance(exc, MCPError):
+                raise
             raise MCPError(f"MCP tool invocation failed: {tool_name}: {exc}") from exc
 
 
