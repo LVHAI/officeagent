@@ -11,10 +11,11 @@ def test_analysis_endpoint_rejects_empty_query():
 
 def test_analysis_endpoint_accepts_query(monkeypatch):
     async def fake_run(query: str):
-        return {"query": query, "report": "ok", "errors": []}
+        return {"task_id": "task-1", "query": query, "report": "ok", "errors": [], "traces": []}
 
     monkeypatch.setattr("app.api.analysis.run_analysis", fake_run)
     client = TestClient(app)
     response = client.post("/api/v1/analyze", json={"query": "分析华东客户流失原因"})
     assert response.status_code == 200
     assert response.json()["report"] == "ok"
+    assert response.json()["task_id"] == "task-1"
