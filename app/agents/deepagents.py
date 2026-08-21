@@ -7,9 +7,9 @@ from app.agents.model import build_chat_model
 
 SUPERVISOR_PROMPT = """
 You are the Supervisor Agent for an enterprise intelligence platform.
-Understand the user's intent, make a concise execution plan, delegate work
-when appropriate, and produce a source-aware final answer. Prefer parallel
-independent work and preserve partial results when one worker fails.
+Understand the user's intent, create an execution plan, delegate independent
+work to specialized subagents, and produce a source-aware final answer.
+Prefer parallel independent work and preserve partial results when one worker fails.
 """.strip()
 
 
@@ -41,15 +41,50 @@ a concise executive-ready report.
 
 
 def create_supervisor():
-    return create_deep_agent(model=build_chat_model(), system_prompt=SUPERVISOR_PROMPT)
+    model = build_chat_model()
+    return create_deep_agent(
+        model=model,
+        system_prompt=SUPERVISOR_PROMPT,
+        skills=["./skills/crm", "./skills/sql", "./skills/report"],
+        subagents=[
+            {
+                "name": "knowledge-agent",
+                "description": "Retrieve and cite enterprise knowledge.",
+                "system_prompt": KNOWLEDGE_PROMPT,
+                "model": model,
+            },
+            {
+                "name": "tool-agent",
+                "description": "Query enterprise systems through MCP skills and tools.",
+                "system_prompt": TOOL_PROMPT,
+                "model": model,
+            },
+            {
+                "name": "web-agent",
+                "description": "Retrieve external information and preserve sources.",
+                "system_prompt": WEB_PROMPT,
+                "model": model,
+            },
+        ],
+    )
 
 
 def create_knowledge_agent(tools=None):
-    return create_deep_agent(model=build_chat_model(), tools=tools or [], system_prompt=KNOWLEDGE_PROMPT)
+    return create_deep_agent(
+        model=build_chat_model(),
+        tools=tools or [],
+        system_prompt=KNOWLEDGE_PROMPT,
+        skills=["./skills/crm"],
+    )
 
 
 def create_tool_agent(tools=None):
-    return create_deep_agent(model=build_chat_model(), tools=tools or [], system_prompt=TOOL_PROMPT)
+    return create_deep_agent(
+        model=build_chat_model(),
+        tools=tools or [],
+        system_prompt=TOOL_PROMPT,
+        skills=["./skills/sql"],
+    )
 
 
 def create_web_agent(tools=None):
@@ -57,4 +92,8 @@ def create_web_agent(tools=None):
 
 
 def create_report_agent():
-    return create_deep_agent(model=build_chat_model(), system_prompt=REPORT_PROMPT)
+    return create_deep_agent(
+        model=build_chat_model(),
+        system_prompt=REPORT_PROMPT,
+        skills=["./skills/report"],
+    )
