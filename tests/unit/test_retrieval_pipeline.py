@@ -19,6 +19,18 @@ def test_retrieval_pipeline_preserves_source_context():
     assert "华东客户流失率" in context
 
 
+def test_retrieval_pipeline_applies_metadata_filter():
+    chunks = [
+        DocumentChunk(id="c1", content="华东客户流失率", metadata={"department": "sales"}),
+        DocumentChunk(id="c2", content="华东客户流失率", metadata={"department": "finance"}),
+    ]
+    pipeline = RetrievalPipeline(chunks)
+
+    results = pipeline.retrieve("华东客户流失率", metadata_filter={"department": "sales"})
+
+    assert [result.chunk.id for result in results] == ["c1"]
+
+
 def test_skill_registry_filters_discovered_tools():
     class FakeClient:
         async def list_tools(self):
