@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from rank_bm25 import BM25Okapi
+
+from app.agents.reranker import KeywordReranker
 
 
 @dataclass(frozen=True)
@@ -19,11 +21,17 @@ class KnowledgeChunk:
 
 
 class HybridRetriever:
-    """轻量 Hybrid RAG 基础实现：BM25 + 可注入的向量检索器。"""
+    """Hybrid RAG：BM25 + 可注入向量检索，并统一进行 Rerank。"""
 
-    def __init__(self, chunks: list[KnowledgeChunk], vector_search: Any | None = None) -> None:
+    def __init__(
+        self,
+        chunks: list[KnowledgeChunk],
+        vector_search: Callable[[str, int], list[KnowledgeChunk]] | None = None,
+        reranker: Any | None = None,
+    ) -> None:
         self._chunks = chunks
         self._vector_search = vector_search
+        self._reranker = reranker or KeywordReranker()
         self._bm25 = BM25Okapi([chunk.text.lower().split() for chunk in chunks]) if chunks else None
 
     def retrieve(self, query: str, top_k: int = 5) -> list[KnowledgeChunk]:
@@ -35,13 +43,18 @@ class HybridRetriever:
             scores = self._bm25.get_scores(query.lower().split())
             for index in sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]:
                 chunk = self._chunks[index]
-                candidates[chunk.chunk_id] = KnowledgeChunk(**{**chunk.__dict__, "score": float(scores[index])})
+                candidates[chunk.chunk_id] = KnowledgeChunk(
+                    **{**chunk.__dict__, "score": float(scores[index])}
+                )
 
         if self._vector_search is not None:
             for chunk in self._vector_search(query, top_k):
-                candidates[chunk.chunk_id] = chunk
+                existing = candidates.get(chunk.chunk_id)
+                # 混合检索不直接覆盖 BM25 分数，避免一个来源完全吞掉另一个来源。
+                if existing is None or chunk.score > existing.score:
+                    candidates[chunk.chunk_id] = chunk
 
-        return sorted(candidates.values(), key=lambda item: item.score, reverse=True)[:top_k]
+        return self._reranker.rerank(query, list(candidates.values()), top_k=top_k)
 
 
 def build_context(chunks: list[KnowledgeChunk]) -> str:
