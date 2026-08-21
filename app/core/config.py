@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_base_url: str | None = None
     llm_model: str = "gpt-4o-mini"
+    embedding_model: str = "text-embedding-3-small"
 
     model_config = SettingsConfigDict(
         env_file=".env",
