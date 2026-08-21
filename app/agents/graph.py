@@ -1,44 +1,33 @@
 from __future__ import annotations
 
 import asyncio
-import operator
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
+import operator
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from app.agents.deepagents import (
-    create_knowledge_agent,
-    create_report_agent,
-    create_supervisor,
-    create_tool_agent,
-    create_web_agent,
-)
-from app.core.execution import gather_bounded, run_with_timeout
+from app.agents.deepagents import create_report_agent, create_supervisor
+from app.core.execution import run_with_timeout
 from app.core.trace import AgentTrace
 
 
 class AgentState(TypedDict, total=False):
     query: str
     task_id: str
-    plan: str
-    knowledge: Any
-    tool: Any
-    web: Any
+    supervisor_result: Any
     report: Any
-    # LangGraph reducer 合并并行节点的 Trace / Error，避免后写覆盖先写。
+    # 并行/多次 Delegation 的 Trace 与错误必须通过 reducer 合并，不能相互覆盖。
     errors: Annotated[list[str], operator.add]
     traces: Annotated[list[dict[str, Any]], operator.add]
 
 
 AGENT_TIMEOUT_SECONDS = 45.0
-MAX_WORKER_CONCURRENCY = 3
-WORKER_GLOBAL_TIMEOUT_SECONDS = 90.0
 
 
 async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, dict[str, Any]]:
-    # 每个 Agent 使用同一个 task_id，形成完整的任务级调用链。
+    # 每个 Agent 沿用同一个 task_id，便于追踪 Supervisor → Sub-Agent 调用链。
     trace = AgentTrace(task_id=task_id, agent_id=agent_id)
     try:
         result = await run_with_timeout(
@@ -55,93 +44,54 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, 
         raise
 
 
-async def supervisor_node(state: AgentState) -> dict:
-    # Supervisor DeepAgent 负责规划和委派；LangGraph 负责外层状态流转。
+async def supervisor_node(state: AgentState) -> dict[str, Any]:
+    """运行 Supervisor DeepAgent；由其 task 工具自主决定委派哪些子 Agent。"""
     task_id = state["task_id"]
     result, trace = await _invoke(create_supervisor(), state["query"], "supervisor", task_id)
-    messages = result.get("messages", []) if isinstance(result, dict) else []
-    plan = messages[-1].content if messages else str(result)
-    return {"plan": plan, "traces": [trace]}
+    return {"supervisor_result": result, "traces": [trace]}
 
 
-async def _run_workers(state: AgentState, task_id: str) -> list[Any]:
-    # 独立 Worker 并发执行，并通过 semaphore 控制最大并发度。
-    agents = {
-        "knowledge": create_knowledge_agent(),
-        "tool": create_tool_agent(),
-        "web": create_web_agent(),
-    }
-    operations = [
-        _invoke(agent, f"Execution plan:\n{state.get('plan', '')}\n\nUser query:\n{state['query']}", name, task_id)
-        for name, agent in agents.items()
-    ]
-    return await gather_bounded(operations, MAX_WORKER_CONCURRENCY)
-
-
-async def worker_node(state: AgentState) -> dict:
-    task_id = state["task_id"]
-    agents = {"knowledge": None, "tool": None, "web": None}
-    try:
-        results = await run_with_timeout(
-            _run_workers(state, task_id),
-            timeout=WORKER_GLOBAL_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError:
-        # 全局超时后取消未完成 Worker，避免后台任务继续占用模型或 MCP 资源。
-        return {
-            "errors": ["workers: global timeout"],
-            "traces": [
-                AgentTrace(
-                    task_id=task_id,
-                    agent_id=name,
-                    status="timeout",
-                    error="worker global timeout",
-                ).to_dict()
-                for name in agents
-            ],
-        }
-
-    output: dict[str, Any] = {}
-    errors: list[str] = []
-    traces: list[dict[str, Any]] = []
-    for name, result in zip(agents, results):
-        if isinstance(result, BaseException):
-            errors.append(f"{name}: {result}")
-            traces.append(
-                AgentTrace(task_id=task_id, agent_id=name, status="failed", error=str(result)).to_dict()
-            )
-        else:
-            value, trace = result
-            output[name] = value
-            traces.append(trace)
-    output["errors"] = errors
-    output["traces"] = traces
-    return output
-
-
-async def report_node(state: AgentState) -> dict:
-    # Report Agent 汇总 Worker 结果，并继续沿用同一个 task_id。
+async def report_node(state: AgentState) -> dict[str, Any]:
+    """将 Supervisor 已经完成的 Delegation 结果交给轻量 Report Agent。"""
     task_id = state["task_id"]
     context = {
         "query": state["query"],
-        "plan": state.get("plan"),
-        "knowledge": state.get("knowledge"),
-        "tool": state.get("tool"),
-        "web": state.get("web"),
+        "supervisor_result": state.get("supervisor_result"),
         "errors": state.get("errors", []),
     }
-    result, trace = await _invoke(create_report_agent(), str(context), "report", task_id)
-    return {"report": result, "traces": [trace]}
+    try:
+        result, trace = await _invoke(
+            create_report_agent(), str(context), "report", task_id
+        )
+        return {"report": result, "traces": [trace]}
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return {
+            "errors": [f"report: {exc}"],
+            "traces": [
+                AgentTrace(
+                    task_id=task_id,
+                    agent_id="report",
+                    status="failed",
+                    error=str(exc),
+                ).to_dict()
+            ],
+        }
 
 
 def build_workflow():
-    # InMemorySaver 用于本地开发的 Checkpoint；生产环境可替换为持久化 Checkpointer。
+    # Supervisor 内部通过 DeepAgents task/subagents 做 Agentic Delegation；
+    # LangGraph 只负责外层 Workflow、State、Checkpoint 和生命周期管理。
     graph = StateGraph(AgentState)
     graph.add_node("supervisor", supervisor_node)
-    graph.add_node("workers", worker_node)
     graph.add_node("report", report_node)
     graph.add_edge(START, "supervisor")
-    graph.add_edge("supervisor", "workers")
-    graph.add_edge("workers", "report")
+    graph.add_edge("supervisor", "report")
     graph.add_edge("report", END)
     return graph.compile(checkpointer=InMemorySaver())
+
+
+def new_task_state(query: str) -> AgentState:
+    """创建独立任务 State，避免不同请求之间共享 Agent 状态。"""
+    return {"query": query, "task_id": str(uuid4()), "errors": [], "traces": []}
