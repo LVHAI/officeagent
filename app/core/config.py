@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     tavily_api_key: str | None = None
 
+    @property
+    def postgres_dsn(self) -> str:
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
