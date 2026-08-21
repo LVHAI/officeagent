@@ -1,8 +1,10 @@
-# OfficeAgent Superpowers Execution Plan
+# OfficeAgent Superpowers 执行计划
 
-## Overview
+## 项目目标
 
-Implement the Enterprise Intelligence Decision Agent Platform based on the spec using:
+基于 spec 实现企业智能分析与决策 Agent 平台。
+
+技术栈：
 
 - DeepAgents
 - LangGraph
@@ -12,23 +14,23 @@ Implement the Enterprise Intelligence Decision Agent Platform based on the spec 
 - Redis
 - PostgreSQL
 
-The implementation follows TDD and focuses on production reliability:
+核心目标：
 
-- Multi-Agent orchestration
-- Concurrent execution
-- Retry strategy
-- Timeout control
-- Circuit breaker
-- Checkpoint recovery
-- Error isolation
+- 多 Agent 协作
+- 并发任务执行
+- 可靠性保障
+- 自动恢复能力
+- TDD 驱动开发
 
 ---
 
-# Phase 1: Agent Runtime
+# 阶段一：Agent Runtime 基础框架
 
-## Goal
+## 目标
 
-Create unified Agent Runtime supporting:
+建立统一 Agent 执行框架。
+
+支持：
 
 - Supervisor Agent
 - Knowledge Agent
@@ -36,115 +38,174 @@ Create unified Agent Runtime supporting:
 - Web Agent
 - Report Agent
 
-## Core Interfaces
+## Agent 接口
 
-Agent execution must use structured context and result objects.
+所有 Agent 必须统一：
 
-Requirements:
+```python
+async execute(context) -> AgentResult
+```
 
-- No uncaught exception propagation
-- Unified error codes
-- Retryable error classification
-- Source trace support
+AgentResult 包含：
+
+- 是否成功
+- 返回数据
+- 错误码
+- 是否可重试
+- Source Trace 信息
+
+要求：
+
+- 禁止未捕获异常向上抛出
+- 统一异常模型
+- 错误分类处理
 
 ---
 
-# Phase 2: LangGraph Workflow Engine
+# 阶段二：LangGraph 工作流引擎
 
-Implement Agent workflow graph:
+## 目标
+
+使用 LangGraph 实现 Agent 状态流转。
+
+流程：
 
 ```
-User
- |
+用户请求
+  |
 Supervisor Agent
- |
-Task Planner
- |
-+-------------+-------------+
-|             |             |
-Knowledge    Tool          Web
-Agent        Agent         Agent
- |
+  |
+任务规划
+  |
++---------+---------+
+|         |         |
+知识Agent 工具Agent Web Agent
+  |
 Report Agent
- |
-Response
+  |
+结果输出
 ```
 
-Requirements:
+## 状态管理
 
-- State persistence
-- Node checkpoint
-- Workflow resume after failure
+保存：
 
----
+- task_id
+- 当前 Agent
+- 执行结果
+- 错误信息
+- checkpoint
 
-# Phase 3: Multi-Agent Concurrent Execution
+支持：
 
-Implement asynchronous execution.
-
-Use:
-
-- asyncio task execution
-- worker pool
-- task queue
-- concurrency limit
-
-Requirements:
-
-- Maximum worker control
-- Task isolation
-- Resource protection
-- Duplicate task prevention
-
-Example:
-
-Knowledge Agent, Tool Agent and Web Agent can execute in parallel.
+- 节点状态保存
+- 失败恢复
+- 工作流继续执行
 
 ---
 
-# Phase 4: Reliability Layer
+# 阶段三：Multi-Agent 并发执行
 
-## Retry
+## 目标
 
-Support retry for:
+支持多个 Agent 并行执行。
 
-- Network failure
+例如：
+
+- Knowledge Agent 查询知识库
+- Tool Agent 查询企业系统
+- Web Agent 获取外部信息
+
+同时运行。
+
+## 实现
+
+使用：
+
+- asyncio
+- Worker Pool
+- Task Queue
+
+设计：
+
+```
+Task Queue
+    |
+Worker Pool
+    |
+Agent Execute
+```
+
+控制：
+
+- 最大并发数
+- 单任务资源隔离
+- 防止重复执行
+- 超载保护
+
+---
+
+# 阶段四：可靠性设计
+
+## Retry 重试机制
+
+支持重试：
+
+- 网络异常
+- 服务暂时不可用
 - Timeout
-- Temporary service unavailable
 
-Strategy:
+策略：
 
 ```
-1s -> 2s -> 4s
+1秒 -> 2秒 -> 4秒
 ```
 
-Maximum retry: 3
+最大重试次数：3
 
-## Timeout
+不可重试：
 
-Every external call must have timeout protection.
+- 参数错误
+- 权限错误
 
-## Circuit Breaker
+---
 
-Protect unavailable services:
+## Timeout 超时控制
+
+所有外部调用必须设置超时：
+
+包括：
+
+- LLM 调用
+- MCP 调用
+- 数据库查询
+- HTTP 请求
+
+---
+
+## Circuit Breaker 熔断
+
+防止外部服务异常导致系统雪崩。
+
+状态：
 
 ```
 CLOSED
-  |
-Failure threshold
-  |
+ |
+失败超过阈值
+ |
 OPEN
-  |
-Recovery
-  |
+ |
+恢复检测
+ |
 HALF_OPEN
 ```
 
 ---
 
-# Phase 5: MCP Tool Framework
+# 阶段五：MCP Tool Framework
 
-Implement:
+目录：
 
 ```
 tools/
@@ -154,99 +215,92 @@ tools/
  └── schema.py
 ```
 
-Support:
+功能：
 
-- Dynamic tool discovery
-- Skill routing
-- MCP server invocation
-- Tool result normalization
+- MCP 服务发现
+- Tool 注册
+- Skill 路由
+- 参数校验
+- 调用结果标准化
 
-Failure handling:
+异常处理：
 
-- Invalid parameters -> fail fast
-- Timeout -> retry
-- Server unavailable -> fallback
+- 参数错误：立即失败
+- 超时：自动重试
+- 服务不可用：降级处理
 
 ---
 
-# Phase 6: Knowledge Agent and RAG
+# 阶段六：Knowledge Agent 与 RAG
 
-Implement:
+实现：
 
-- Milvus retrieval
-- Multi-route retrieval
-- Metadata filtering
-- BM25 search
-- Vector search
+- Milvus 向量检索
+- BM25 检索
+- Metadata Filter
+- 多路召回
 - Reranker
 
-Pipeline:
+流程：
 
 ```
 Query
  |
-Rewrite
+问题改写
  |
-Retrieve
+多路召回
  |
-Merge
+结果合并
  |
 Rerank
  |
-Context Builder
+上下文生成
 ```
 
-Failure handling:
+异常处理：
 
-- Vector database unavailable -> keyword fallback
-- Empty result -> query rewrite and retry
-
----
-
-# Phase 7: Memory System
-
-Implement:
-
-## Short Term Memory
-
-Store:
-
-- Current task state
-- Agent communication
-
-## Long Term Memory
-
-Store:
-
-- Historical analysis
-- User preferences
-
-Requirements:
-
-- Memory failure fallback
-- Data cleanup strategy
+- Milvus 不可用 -> 关键词检索降级
+- 无结果 -> Query Rewrite 后再次检索
 
 ---
 
-# Phase 8: Source Trace
+# 阶段七：Memory 系统
 
-All answers must contain trace information.
+短期记忆：
 
-Support:
+- 当前任务上下文
+- Agent 通信记录
 
-- Document name
-- Page number
-- Chapter
-- API source
-- Timestamp
+长期记忆：
 
-Enable enterprise audit capability.
+- 历史分析结果
+- 用户偏好
+
+要求：
+
+- Redis 故障降级
+- 长期记忆清理策略
 
 ---
 
-# Phase 9: API Layer
+# 阶段八：Source Trace 审计
 
-FastAPI endpoints:
+所有答案必须支持来源追踪。
+
+记录：
+
+- 文档名称
+- 页码
+- API 来源
+- 时间戳
+
+用于企业审计。
+
+---
+
+# 阶段九：API 层
+
+FastAPI 接口：
 
 ```
 POST /tasks
@@ -255,74 +309,74 @@ GET /tasks/{id}/status
 POST /tasks/{id}/cancel
 ```
 
-Requirements:
+要求：
 
-- Async task submission
-- Idempotency key
-- Unified API error response
+- 异步任务提交
+- Idempotency-Key 防重复提交
+- 统一错误返回
 
 ---
 
-# Phase 10: TDD Strategy
+# 阶段十：TDD 测试计划
 
-## Unit Tests
+## 单元测试
 
-Cover:
+覆盖：
 
-- Agent interface
+- Agent 接口
 - Scheduler
-- Retry mechanism
-- Circuit breaker
-- MCP client
-- Retriever
+- Retry
+- Circuit Breaker
+- MCP Client
+- RAG Retriever
 
-## Integration Tests
+## 集成测试
 
-Scenario:
+完整流程：
 
 ```
-User Query
+用户请求
  -> Supervisor
- -> Parallel Agents
+ -> 并行Agent
  -> MCP/RAG
  -> Report
- -> Answer
+ -> 返回结果
 ```
 
-## Failure Tests
+## 异常测试
 
-Must verify:
+必须验证：
 
-- MCP timeout recovery
-- Agent crash recovery
-- Milvus unavailable fallback
-- Concurrent task conflict handling
-
----
-
-# Phase 11: Performance Testing
-
-Test:
-
-- Concurrent users
-- Agent throughput
-- P95 latency
-- Token consumption
-- Failure rate
+- MCP 超时恢复
+- Agent 崩溃恢复
+- Milvus 故障降级
+- 并发冲突处理
 
 ---
 
-# Definition of Done
+# 阶段十一：性能测试
 
-- [ ] Supervisor Agent completed
-- [ ] LangGraph workflow completed
-- [ ] Multi-Agent parallel execution completed
-- [ ] MCP framework completed
-- [ ] Retry completed
-- [ ] Timeout completed
-- [ ] Circuit breaker completed
-- [ ] Checkpoint recovery completed
-- [ ] RAG pipeline completed
-- [ ] Source trace completed
-- [ ] TDD tests completed
-- [ ] Production deployment supported
+测试指标：
+
+- 并发用户数量
+- Agent 吞吐量
+- P95 延迟
+- Token 消耗
+- 错误率
+
+---
+
+# 完成标准 Definition of Done
+
+- [ ] Supervisor Agent 完成
+- [ ] LangGraph 工作流完成
+- [ ] Multi-Agent 并发完成
+- [ ] MCP Framework 完成
+- [ ] Retry 完成
+- [ ] Timeout 完成
+- [ ] Circuit Breaker 完成
+- [ ] Checkpoint 恢复完成
+- [ ] RAG Pipeline 完成
+- [ ] Source Trace 完成
+- [ ] TDD 测试完成
+- [ ] 支持生产部署
