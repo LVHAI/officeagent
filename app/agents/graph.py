@@ -5,6 +5,7 @@ import operator
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.deepagents import (
@@ -20,26 +21,24 @@ from app.core.trace import AgentTrace
 
 class AgentState(TypedDict, total=False):
     query: str
+    task_id: str
     plan: str
     knowledge: Any
     tool: Any
     web: Any
     report: Any
-    # LangGraph 使用 reducer 合并不同节点产生的 Trace / Error，避免后一个节点覆盖前一个节点。
+    # LangGraph reducer 合并并行节点的 Trace / Error，避免后写覆盖先写。
     errors: Annotated[list[str], operator.add]
     traces: Annotated[list[dict[str, Any]], operator.add]
 
 
-# 单个 Agent 的超时时间；避免某一个外部模型调用长期占用整个任务。
 AGENT_TIMEOUT_SECONDS = 45.0
-# 一个任务最多同时运行 3 个 Worker；后续接入更多 Agent 时仍保持有界并发。
 MAX_WORKER_CONCURRENCY = 3
-# 整个 Worker 阶段的总超时，超时后会向未完成的子任务传播取消信号。
 WORKER_GLOBAL_TIMEOUT_SECONDS = 90.0
 
 
 async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, dict[str, Any]]:
-    # 每次 Agent 调用都建立独立 Trace，便于定位慢调用和失败节点。
+    # 每个 Agent 使用同一个 task_id，形成完整的任务级调用链。
     trace = AgentTrace(task_id=task_id, agent_id=agent_id)
     try:
         result = await run_with_timeout(
@@ -57,8 +56,8 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str) -> tuple[Any, 
 
 
 async def supervisor_node(state: AgentState) -> dict:
-    # Supervisor 负责理解任务和规划，不直接承担所有业务查询。
-    task_id = str(uuid4())
+    # Supervisor DeepAgent 负责规划和委派；LangGraph 负责外层状态流转。
+    task_id = state["task_id"]
     result, trace = await _invoke(create_supervisor(), state["query"], "supervisor", task_id)
     messages = result.get("messages", []) if isinstance(result, dict) else []
     plan = messages[-1].content if messages else str(result)
@@ -66,18 +65,21 @@ async def supervisor_node(state: AgentState) -> dict:
 
 
 async def _run_workers(state: AgentState, task_id: str) -> list[Any]:
-    # 三类独立任务并发执行，并通过 semaphore 控制最大并发度。
+    # 独立 Worker 并发执行，并通过 semaphore 控制最大并发度。
     agents = {
         "knowledge": create_knowledge_agent(),
         "tool": create_tool_agent(),
         "web": create_web_agent(),
     }
-    operations = [_invoke(agent, state["query"], name, task_id) for name, agent in agents.items()]
+    operations = [
+        _invoke(agent, f"Execution plan:\n{state.get('plan', '')}\n\nUser query:\n{state['query']}", name, task_id)
+        for name, agent in agents.items()
+    ]
     return await gather_bounded(operations, MAX_WORKER_CONCURRENCY)
 
 
 async def worker_node(state: AgentState) -> dict:
-    task_id = str(uuid4())
+    task_id = state["task_id"]
     agents = {"knowledge": None, "tool": None, "web": None}
     try:
         results = await run_with_timeout(
@@ -85,7 +87,7 @@ async def worker_node(state: AgentState) -> dict:
             timeout=WORKER_GLOBAL_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        # 全局超时后主动取消尚未完成的 Worker，避免后台任务继续占用资源。
+        # 全局超时后取消未完成 Worker，避免后台任务继续占用模型或 MCP 资源。
         return {
             "errors": ["workers: global timeout"],
             "traces": [
@@ -104,7 +106,6 @@ async def worker_node(state: AgentState) -> dict:
     traces: list[dict[str, Any]] = []
     for name, result in zip(agents, results):
         if isinstance(result, BaseException):
-            # 单个 Agent 失败只记录 Partial Failure，不影响其他独立 Agent 的结果。
             errors.append(f"{name}: {result}")
             traces.append(
                 AgentTrace(task_id=task_id, agent_id=name, status="failed", error=str(result)).to_dict()
@@ -119,8 +120,8 @@ async def worker_node(state: AgentState) -> dict:
 
 
 async def report_node(state: AgentState) -> dict:
-    # Report Agent 只负责汇总已经获取的数据，并保留失败信息和来源。
-    task_id = str(uuid4())
+    # Report Agent 汇总 Worker 结果，并继续沿用同一个 task_id。
+    task_id = state["task_id"]
     context = {
         "query": state["query"],
         "plan": state.get("plan"),
@@ -134,7 +135,7 @@ async def report_node(state: AgentState) -> dict:
 
 
 def build_workflow():
-    # LangGraph 负责状态和流程控制；具体 Multi-Agent Runtime 由 DeepAgents 提供。
+    # InMemorySaver 用于本地开发的 Checkpoint；生产环境可替换为持久化 Checkpointer。
     graph = StateGraph(AgentState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("workers", worker_node)
@@ -143,4 +144,4 @@ def build_workflow():
     graph.add_edge("supervisor", "workers")
     graph.add_edge("workers", "report")
     graph.add_edge("report", END)
-    return graph.compile()
+    return graph.compile(checkpointer=InMemorySaver())
