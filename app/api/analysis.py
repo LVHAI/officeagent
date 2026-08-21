@@ -1,4 +1,4 @@
-from __future__ import annotations
+from uuid import uuid4
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -19,15 +19,20 @@ _workflow = None
 def _get_workflow():
     global _workflow
     if _workflow is None:
-        # Workflow 只构建一次，避免每个 HTTP 请求重复创建 LangGraph 图。
+        # Workflow 只构建一次，Checkpoint 生命周期与本地开发进程一致。
         _workflow = build_workflow()
     return _workflow
 
 
 async def run_analysis(query: str) -> dict:
-    # 每个请求使用独立 State；Graph 内部负责 Agent 并发和状态合并。
-    result = await _get_workflow().ainvoke({"query": query, "errors": [], "traces": []})
+    task_id = str(uuid4())
+    # task_id 同时作为 LangGraph checkpoint 的 thread_id，支持按任务恢复和检查状态。
+    result = await _get_workflow().ainvoke(
+        {"query": query, "task_id": task_id, "errors": [], "traces": []},
+        config={"configurable": {"thread_id": task_id}},
+    )
     return {
+        "task_id": task_id,
         "query": query,
         "report": result.get("report"),
         "errors": result.get("errors", []),
