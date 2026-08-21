@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.tools.mcp_client import MCPClient
+from app.mcp.client import MCPClient
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,8 @@ class SkillRegistry:
         self.skills: dict[str, Skill] = {}
 
     def register(self, skill: Skill) -> None:
+        if skill.server not in self.clients:
+            raise ValueError(f"MCP client {skill.server!r} is not configured")
         self.skills[skill.name] = skill
 
     def describe(self) -> list[dict[str, Any]]:
