@@ -148,6 +148,8 @@ async def run_analysis(query: str) -> dict:
             status_code=504,
             detail=f"analysis timed out after {GLOBAL_TIMEOUT_SECONDS:.1f}s; task_id={task_id}",
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception(
             "analysis.failed task_id=%s total_elapsed_ms=%.1f error=%s",
