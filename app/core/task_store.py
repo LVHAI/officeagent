@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Protocol
 
 from app.core.config import Settings, settings
+from app.core.json_utils import dumps_json
 
 
 @dataclass(frozen=True)
@@ -73,8 +75,6 @@ class PostgresTaskStore:
             conn.commit()
 
     def save(self, record: TaskRecord) -> None:
-        import json
-
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -90,7 +90,7 @@ class PostgresTaskStore:
                     (
                         record.task_id,
                         record.status,
-                        json.dumps(record.result) if record.result is not None else None,
+                        dumps_json(record.result) if record.result is not None else None,
                         record.error,
                         record.updated_at,
                     ),
@@ -98,8 +98,6 @@ class PostgresTaskStore:
             conn.commit()
 
     def get(self, task_id: str) -> TaskRecord | None:
-        import json
-
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
