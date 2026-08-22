@@ -14,7 +14,8 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 # 只启动外部基础设施，Backend/DeepAgents 仍在 Mac 本机运行，方便 IDE 调试。
-docker compose -f "$COMPOSE_FILE" up -d
+# --build ensures MCP image changes (such as PostgreSQL support) are picked up.
+docker compose -f "$COMPOSE_FILE" up -d --build
 
 echo "Waiting for infrastructure services..."
 for i in $(seq 1 60); do
