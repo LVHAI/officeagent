@@ -56,4 +56,10 @@ def report_generate(title: str, content: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    # The MCP server runs inside Docker. Bind to all container interfaces so
+    # Docker's published port can reach the process from the host.
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=8000,
+    )
