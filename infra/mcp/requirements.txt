@@ -1,1 +1,4 @@
-mcp>=1.12,<2
+# MCP 1.12 introduced Streamable HTTP regressions in the Python SDK.
+# Keep the mock servers on the known-good 1.11 line until the transport
+# implementation is upgraded and verified against the project's client.
+mcp==1.11.0
