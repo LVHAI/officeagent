@@ -29,6 +29,14 @@ class FailingTransport:
         raise RuntimeError("timeout")
 
 
+class TaskGroupFailingTransport:
+    async def list_tools(self):
+        raise ExceptionGroup("unhandled errors in a TaskGroup", [ConnectionError("connection refused")])
+
+    async def call_tool(self, name, arguments):
+        raise ExceptionGroup("unhandled errors in a TaskGroup", [ConnectionError("connection refused")])
+
+
 @pytest.mark.asyncio
 async def test_mcp_client_discovers_tool_schema_and_invokes_tool():
     client = MCPClient(FakeTransport())
@@ -49,4 +57,15 @@ async def test_mcp_client_normalizes_transport_errors():
         await client.discover_tools()
 
     with pytest.raises(MCPError, match="invocation"):
+        await client.call("customer.search", {})
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_exposes_nested_taskgroup_error_details():
+    client = MCPClient(TaskGroupFailingTransport(), retry_attempts=1)
+
+    with pytest.raises(MCPError, match="ConnectionError: connection refused"):
+        await client.discover_tools()
+
+    with pytest.raises(MCPError, match="ConnectionError: connection refused"):
         await client.call("customer.search", {})
