@@ -146,8 +146,6 @@ def _parse_report_response(content: Any) -> AnalysisReport:
     try:
         return AnalysisReport.model_validate_json(text)
     except Exception:
-        # Accept a JSON object embedded in a short model response, without
-        # silently accepting arbitrary prose as a report.
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
@@ -155,13 +153,18 @@ def _parse_report_response(content: Any) -> AnalysisReport:
         return AnalysisReport.model_validate(json.loads(text[start : end + 1]))
 
 
-def create_report_agent():
-    model = build_chat_model()
+class _ReportAgent:
+    """Adapter exposing the same ainvoke contract used by graph._invoke."""
 
-    async def report_node(request: dict[str, Any]) -> AnalysisReport:
+    def __init__(self, model: Any):
+        self._model = model
+
+    async def ainvoke(self, request: dict[str, Any]) -> AnalysisReport:
         messages = request.get("messages", [])
         context = messages[-1].get("content", "") if messages else ""
-        response = await model.ainvoke(_report_json_prompt(str(context)))
+        response = await self._model.ainvoke(_report_json_prompt(str(context)))
         return _parse_report_response(response.content)
 
-    return report_node
+
+def create_report_agent():
+    return _ReportAgent(build_chat_model())
