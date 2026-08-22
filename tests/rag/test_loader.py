@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 from docx import Document
@@ -109,3 +110,35 @@ def test_load_corpus_reads_pdf_and_docx_with_folder_strategy(tmp_path: Path) -> 
         (".docx", "parent_child"),
     }
     assert next(document for document in documents if document.path.suffix == ".docx").content == "父子文档测试内容"
+
+
+def test_load_policy_json_array(tmp_path: Path) -> None:
+    path = tmp_path / "policy" / "labor.json"
+    path.parent.mkdir(parents=True)
+    payload = [
+        {"中华人民共和国劳动合同法 第一条": "完善劳动合同制度。"},
+        {"中华人民共和国劳动合同法 第二条": "保护劳动者合法权益。"},
+    ]
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    assert DocumentLoader().load(path) == json.dumps(payload, ensure_ascii=False)
+
+
+def test_policy_nodes_parse_json_array_into_article_chunks(tmp_path: Path) -> None:
+    from app.rag.splitter import policy_nodes
+
+    path = tmp_path / "policy" / "labor.json"
+    path.parent.mkdir(parents=True)
+    payload = [
+        {"中华人民共和国劳动合同法 第一条": "完善劳动合同制度。"},
+        {"中华人民共和国劳动合同法 第二条": "保护劳动者合法权益。"},
+    ]
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    chunks = policy_nodes(DocumentLoader().load(path), path.name)
+
+    assert len(chunks) == 2
+    assert chunks[0].content == "中华人民共和国劳动合同法 第一条：完善劳动合同制度。"
+    assert chunks[0].metadata["document"] == "中华人民共和国劳动合同法"
+    assert chunks[0].metadata["article"] == "第一条"
+    assert chunks[1].metadata["article"] == "第二条"
