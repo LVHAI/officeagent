@@ -28,10 +28,13 @@ class Settings(BaseSettings):
     knowledge_mcp_url: str = "http://127.0.0.1:8103/mcp"
     report_mcp_url: str = "http://127.0.0.1:8104/mcp"
 
+    # Qwen is the platform's default LLM. It is accessed through
+    # Alibaba Cloud Model Studio's OpenAI-compatible Chat Completions API.
+    llm_provider: str = "qwen"
     llm_api_key: str | None = None
-    llm_base_url: str | None = None
-    llm_model: str = "gpt-4o-mini"
-    llm_timeout_seconds: float = 30.0
+    llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    llm_model: str = "qwen-plus"
+    llm_timeout_seconds: float = 60.0
     embedding_model: str = "text-embedding-3-small"
     tavily_api_key: str | None = None
 
