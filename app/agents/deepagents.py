@@ -158,11 +158,10 @@ def _parse_report_response(content: Any) -> AnalysisReport:
 def create_report_agent():
     model = build_chat_model()
 
-    async def report_node(request: dict[str, Any]) -> dict[str, Any]:
+    async def report_node(request: dict[str, Any]) -> AnalysisReport:
         messages = request.get("messages", [])
         context = messages[-1].get("content", "") if messages else ""
         response = await model.ainvoke(_report_json_prompt(str(context)))
-        report = _parse_report_response(response.content)
-        return {"messages": [{"role": "assistant", "content": report.model_dump_json()}], "report": report}
+        return _parse_report_response(response.content)
 
     return report_node
