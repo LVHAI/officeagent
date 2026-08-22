@@ -7,7 +7,12 @@ from collections.abc import Callable, Iterable, Sequence
 from app.rag.models import DocumentChunk
 
 
-_POLICY_KEY_PATTERN = re.compile(r"^(?P<document>.+?)\s+(?P<article>第[一二三四五六七八九十百千万0-9]+条)$")
+# 政策 JSON 的条款编号可能使用中文数字（包括“零/〇”）或阿拉伯数字。
+# 例如：第一条、第十条、第九十九条、第一百零一条、第101条。
+_POLICY_ARTICLE_NUMBER = r"[零〇一二三四五六七八九十百千万亿0-9]+"
+_POLICY_KEY_PATTERN = re.compile(
+    rf"^(?P<document>.+?)\s+(?P<article>第{_POLICY_ARTICLE_NUMBER}条)$"
+)
 _SENTENCE_PATTERN = re.compile(r"(?<=[。！？!?；;])\s*|\n{2,}")
 
 
@@ -27,13 +32,14 @@ def _policy_json_nodes(text: str) -> list[DocumentChunk] | None:
         for key, value in item.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise ValueError("policy JSON 的 key 和 value 必须都是字符串")
-            match = _POLICY_KEY_PATTERN.match(key.strip())
+            key = key.strip()
+            match = _POLICY_KEY_PATTERN.fullmatch(key)
             if not match:
                 raise ValueError(f"无效的政策条款 key: {key!r}，格式应为“法律名称 第X条”")
             chunks.append(
                 DocumentChunk(
                     id=f"policy_{len(chunks) + 1:05d}",
-                    content=f"{key.strip()}：{value.strip()}",
+                    content=f"{key}：{value.strip()}",
                     metadata={
                         "document": match.group("document").strip(),
                         "doc_type": "policy",
@@ -49,10 +55,13 @@ def policy_nodes(text: str, document: str) -> list[DocumentChunk]:
     if json_nodes is not None:
         return json_nodes
 
-    pattern = re.compile(r"(第[一二三四五六七八九十百0-9]+条[：:]?.*?)(?=第[一二三四五六七八九十百0-9]+条|$)", re.S)
+    pattern = re.compile(
+        rf"(第{_POLICY_ARTICLE_NUMBER}条[：:]?.*?)(?=第{_POLICY_ARTICLE_NUMBER}条|$)",
+        re.S,
+    )
     chunks: list[DocumentChunk] = []
     for index, match in enumerate(pattern.finditer(text), start=1):
-        article = re.match(r"(第[一二三四五六七八九十百0-9]+条)", match.group(1))
+        article = re.match(rf"(第{_POLICY_ARTICLE_NUMBER}条)", match.group(1))
         article_name = article.group(1) if article else None
         chunks.append(
             DocumentChunk(
