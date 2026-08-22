@@ -3,7 +3,14 @@ import os
 from mcp.server.fastmcp import FastMCP
 from starlette.responses import JSONResponse
 
-mcp = FastMCP(os.getenv("SERVICE_NAME", "enterprise"))
+# FastMCP 1.11 configures the HTTP bind address/port on the server settings,
+# while FastMCP.run() only accepts transport/mount_path.  Configure the
+# container listener explicitly so Docker can publish port 8000 to the host.
+mcp = FastMCP(
+    os.getenv("SERVICE_NAME", "enterprise"),
+    host="0.0.0.0",
+    port=8000,
+)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -56,10 +63,4 @@ def report_generate(title: str, content: str) -> dict:
 
 
 if __name__ == "__main__":
-    # The MCP server runs inside Docker. Bind to all container interfaces so
-    # Docker's published port can reach the process from the host.
-    mcp.run(
-        transport="streamable-http",
-        host="0.0.0.0",
-        port=8000,
-    )
+    mcp.run(transport="streamable-http")
