@@ -78,11 +78,13 @@ async def _sql_query(sql: str, limit: int = 100) -> dict[str, Any]:
     }
 
 
-def build_service_tools(service_name: str) -> list[Any]:
+def build_service_tools(service_name: str, server: FastMCP | None = None) -> list[Any]:
     """Return only the tools belonging to the selected MCP service."""
+    server = server or mcp
+
     if service_name == "database":
 
-        @mcp.tool(name="sql_query")
+        @server.tool(name="sql_query")
         async def sql_query(sql: str, limit: int = 100) -> dict[str, Any]:
             """Execute one bounded read-only SQL query against PostgreSQL."""
             return await _sql_query(sql, limit)
@@ -91,7 +93,7 @@ def build_service_tools(service_name: str) -> list[Any]:
 
     if service_name == "crm":
 
-        @mcp.tool(name="customer_query")
+        @server.tool(name="customer_query")
         async def customer_query(region: str | None = None) -> dict[str, Any]:
             """Compatibility CRM query backed by PostgreSQL customer data."""
             clauses = []
@@ -127,7 +129,7 @@ def build_service_tools(service_name: str) -> list[Any]:
 
     if service_name == "knowledge":
 
-        @mcp.tool()
+        @server.tool()
         def knowledge_search(query: str) -> dict[str, Any]:
             return {
                 "system": "Knowledge",
@@ -140,7 +142,7 @@ def build_service_tools(service_name: str) -> list[Any]:
 
     if service_name == "report":
 
-        @mcp.tool()
+        @server.tool()
         def report_generate(title: str, content: str) -> dict[str, Any]:
             return {
                 "system": "Report",
