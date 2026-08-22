@@ -1,15 +1,18 @@
 from infra.mcp.mock_server import build_service_tools, validate_read_only_sql
+from mcp.server.fastmcp import FastMCP
 
 
 def test_database_service_exposes_read_only_sql_tool():
-    tools = build_service_tools("database")
+    server = FastMCP("database-test")
+    tools = build_service_tools("database", server)
     names = {tool.name for tool in tools}
 
     assert names == {"sql_query"}
 
 
 def test_crm_service_does_not_expose_database_sql_tool():
-    tools = build_service_tools("crm")
+    server = FastMCP("crm-test")
+    tools = build_service_tools("crm", server)
     names = {tool.name for tool in tools}
 
     assert "sql_query" not in names
