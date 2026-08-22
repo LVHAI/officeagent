@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 
@@ -9,19 +10,27 @@ from app.core.checkpoint import close_checkpointer, initialize_checkpointer
 from app.core.config import settings
 from app.core.health import dependency_status
 
+logging.getLogger("app").setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    logger.info("application.startup environment=%s", settings.environment)
     initialize_task_store()
+    logger.info("application.task_store.initialized")
     if settings.environment != "test":
         await initialize_checkpointer()
+        logger.info("application.checkpointer.initialized")
         await mcp_registry.initialize()
+        logger.info("application.mcp.initialized errors=%d", len(mcp_registry.errors))
     try:
         yield
     finally:
         if settings.environment != "test":
             await mcp_registry.close()
             await close_checkpointer()
+        logger.info("application.shutdown")
 
 
 app = FastAPI(title="OfficeAgent", version="0.1.0", lifespan=lifespan)
