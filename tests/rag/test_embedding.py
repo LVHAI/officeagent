@@ -10,3 +10,4 @@ def test_embedding_service_uses_dashscope_embedding_model_by_default() -> None:
     kwargs = embeddings_cls.call_args.kwargs
     assert kwargs["model"] == "text-embedding-v4"
     assert kwargs["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert kwargs["tiktoken_enabled"] is False
