@@ -16,9 +16,11 @@ class EmbeddingService:
             kwargs["api_key"] = settings.llm_api_key
         if settings.llm_base_url:
             kwargs["base_url"] = settings.llm_base_url
-        # Embedding 模型通过配置注入，避免将模型名称写死在 RAG Pipeline 中。
+        # DashScope 的 OpenAI-compatible Embedding API 接收原始字符串，
+        # 不应由 langchain-openai 预先做 tiktoken 编码后发送 token ids。
         self._embeddings = OpenAIEmbeddings(
             model=settings.embedding_model,
+            tiktoken_enabled=False,
             **kwargs,
         )
 
