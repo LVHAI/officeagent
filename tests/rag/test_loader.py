@@ -38,3 +38,26 @@ def test_resolve_type_works_without_corpus_root(tmp_path: Path) -> None:
     document.write_text("FAQ: how does this work?", encoding="utf-8")
 
     assert DocumentLoader().resolve_type(document) == "faq"
+
+
+def test_load_corpus_reads_all_strategy_folders(tmp_path: Path) -> None:
+    corpus = tmp_path / "rag"
+    for strategy in ("policy", "faq", "parent_child", "semantic"):
+        document = corpus / strategy / f"{strategy}.md"
+        document.parent.mkdir(parents=True)
+        document.write_text(f"content for {strategy}", encoding="utf-8")
+
+    documents = DocumentLoader().load_corpus(corpus)
+
+    assert {document.doc_type for document in documents} == {
+        "policy",
+        "faq",
+        "parent_child",
+        "semantic",
+    }
+    assert {document.path.parent.name for document in documents} == {
+        "policy",
+        "faq",
+        "parent_child",
+        "semantic",
+    }
