@@ -46,7 +46,9 @@ partial or failed agent results. Never invent evidence.
 
 
 def build_tavily_search() -> Any:
-    """创建 Web Agent 专用 Tavily 工具，避免把 Web Tool 暴露给其他 Agent。"""
+    """创建 Web Agent 专用 Tavily 工具；未配置 Key 时不在测试/离线环境实例化。"""
+    if not settings.tavily_api_key:
+        return None
     return TavilySearch(
         max_results=5,
         topic="general",
@@ -57,6 +59,8 @@ def build_tavily_search() -> Any:
 def create_supervisor():
     model = build_chat_model()
     # Supervisor 使用 DeepAgents 的 task/subagents 完成真正的 Agentic Delegation。
+    web_tool = build_tavily_search()
+    tools = [web_tool] if web_tool is not None else []
     return create_deep_agent(
         model=model,
         system_prompt=SUPERVISOR_PROMPT,
@@ -80,7 +84,7 @@ def create_supervisor():
                 "description": "Retrieve current external information with Tavily.",
                 "system_prompt": WEB_PROMPT,
                 "model": model,
-                "tools": [build_tavily_search()],
+                "tools": tools,
             },
         ],
     )
@@ -104,7 +108,11 @@ def create_tool_agent(tools=None):
 
 
 def create_web_agent(tools=None):
-    web_tools = tools if tools is not None else [build_tavily_search()]
+    web_tools = tools if tools is not None else []
+    if tools is None:
+        tavily = build_tavily_search()
+        if tavily is not None:
+            web_tools = [tavily]
     return create_agent(
         model=build_chat_model(),
         tools=web_tools,
