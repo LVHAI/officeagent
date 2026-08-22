@@ -1,8 +1,14 @@
 import os
 
 from mcp.server.fastmcp import FastMCP
+from starlette.responses import JSONResponse
 
 mcp = FastMCP(os.getenv("SERVICE_NAME", "enterprise"))
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request):
+    return JSONResponse({"status": "ok"})
 
 
 @mcp.tool()
