@@ -86,6 +86,14 @@ services:
       context: ./mcp
     environment:
       SERVICE_NAME: crm
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: officeagent
+      POSTGRES_USER: officeagent
+      POSTGRES_PASSWORD: officeagent
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8101:8000"
     healthcheck:
@@ -99,6 +107,14 @@ services:
       context: ./mcp
     environment:
       SERVICE_NAME: database
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: officeagent
+      POSTGRES_USER: officeagent
+      POSTGRES_PASSWORD: officeagent
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8102:8000"
     healthcheck:
@@ -133,7 +149,7 @@ services:
       timeout: 3s
       retries: 10
 
-volumes:
+a volumes:
   postgres-data:
   redis-data:
   etcd-data:
