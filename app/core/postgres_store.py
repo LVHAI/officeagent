@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
 import psycopg
 
 from app.core.audit import AuditEvent
 from app.core.config import Settings, settings
+from app.core.json_utils import dumps_json
 from app.core.task_store import TaskRecord
 
 
@@ -63,7 +63,7 @@ class PostgresTaskStore:
                 (
                     record.task_id,
                     record.status,
-                    json.dumps(record.result) if record.result is not None else None,
+                    dumps_json(record.result) if record.result is not None else None,
                     record.error,
                     record.updated_at,
                 ),
@@ -82,7 +82,7 @@ class PostgresTaskStore:
                     event.task_id,
                     event.event_type,
                     event.actor,
-                    json.dumps(event.payload),
+                    dumps_json(event.payload),
                     event.created_at,
                 ),
             )
