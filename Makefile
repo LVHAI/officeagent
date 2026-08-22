@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down infra-logs infra-status infra-reset dev test lint
+.PHONY: infra-up infra-down infra-logs infra-status infra-reset seed-crm-db dev test lint
 
 infra-up:
 	bash scripts/start-infra.sh
@@ -14,6 +14,9 @@ infra-status:
 
 infra-reset:
 	docker compose -f infra/docker-compose.yml down -v
+
+seed-crm-db:
+	bash scripts/seed-crm-db.sh
 
 dev:
 	python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
