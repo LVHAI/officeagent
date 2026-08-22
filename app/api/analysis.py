@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from asyncio import to_thread
@@ -33,7 +34,10 @@ def _get_workflow():
         logger.info("analysis.workflow.build.start")
         started = time.perf_counter()
         _workflow = build_workflow()
-        logger.info("analysis.workflow.build.completed elapsed_ms=%.1f", (time.perf_counter() - started) * 1000)
+        logger.info(
+            "analysis.workflow.build.completed elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+        )
     return _workflow
 
 
@@ -47,14 +51,27 @@ def initialize_task_store() -> None:
     """Initialize the configured persistent task store before serving requests."""
     setup = getattr(_task_store, "setup", None)
     if callable(setup):
+        started = time.perf_counter()
+        logger.info("analysis.task_store.setup.start store=%s", type(_task_store).__name__)
         setup()
+        logger.info(
+            "analysis.task_store.setup.completed store=%s elapsed_ms=%.1f",
+            type(_task_store).__name__,
+            (time.perf_counter() - started) * 1000,
+        )
 
 
 async def _save(record: TaskRecord) -> None:
     # psycopg 是同步驱动，放入线程池避免阻塞 Agent 事件循环。
     started = time.perf_counter()
+    logger.info("analysis.task_store.save.start task_id=%s status=%s", record.task_id, record.status)
     await to_thread(_task_store.save, record)
-    logger.info("analysis.task_store.save status=%s elapsed_ms=%.1f", record.status, (time.perf_counter() - started) * 1000)
+    logger.info(
+        "analysis.task_store.save.completed task_id=%s status=%s elapsed_ms=%.1f",
+        record.task_id,
+        record.status,
+        (time.perf_counter() - started) * 1000,
+    )
 
 
 async def _get(task_id: str) -> TaskRecord | None:
@@ -67,10 +84,17 @@ async def run_analysis(query: str) -> dict:
     logger.info("analysis.start task_id=%s query_length=%d", task_id, len(query))
     await _save(TaskRecord(task_id=task_id, status="running"))
     try:
-        logger.info("analysis.workflow.invoke.start task_id=%s timeout_seconds=%.1f", task_id, GLOBAL_TIMEOUT_SECONDS)
+        logger.info(
+            "analysis.workflow.prepare task_id=%s timeout_seconds=%.1f",
+            task_id,
+            GLOBAL_TIMEOUT_SECONDS,
+        )
+        workflow = _get_workflow()
+        logger.info("analysis.workflow.ready task_id=%s", task_id)
+        logger.info("analysis.workflow.invoke.start task_id=%s", task_id)
         workflow_started = time.perf_counter()
         result = await run_with_timeout(
-            _get_workflow().ainvoke(
+            workflow.ainvoke(
                 {"query": query, "task_id": task_id, "errors": [], "traces": [], "delegations": []},
                 config={"configurable": {"thread_id": task_id}},
             ),
@@ -106,6 +130,24 @@ async def run_analysis(query: str) -> dict:
             (time.perf_counter() - request_started) * 1000,
         )
         return response
+    except asyncio.TimeoutError:
+        logger.error(
+            "analysis.timeout task_id=%s timeout_seconds=%.1f total_elapsed_ms=%.1f",
+            task_id,
+            GLOBAL_TIMEOUT_SECONDS,
+            (time.perf_counter() - request_started) * 1000,
+        )
+        await _save(
+            TaskRecord(
+                task_id=task_id,
+                status="failed",
+                error=f"analysis timeout after {GLOBAL_TIMEOUT_SECONDS:.1f}s",
+            )
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"analysis timed out after {GLOBAL_TIMEOUT_SECONDS:.1f}s; task_id={task_id}",
+        )
     except Exception as exc:
         logger.exception(
             "analysis.failed task_id=%s total_elapsed_ms=%.1f error=%s",
