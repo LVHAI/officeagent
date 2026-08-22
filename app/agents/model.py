@@ -13,15 +13,18 @@ def build_chat_model() -> ChatOpenAI:
     kwargs: dict = {
         "model": settings.llm_model,
         "temperature": 0,
+        "timeout": settings.llm_timeout_seconds,
+        "max_retries": 0,
     }
     if settings.llm_api_key:
         kwargs["api_key"] = settings.llm_api_key
     if settings.llm_base_url:
         kwargs["base_url"] = settings.llm_base_url
     logger.info(
-        "llm.model.build model=%s base_url=%s api_key_configured=%s",
+        "llm.model.build model=%s base_url=%s api_key_configured=%s timeout_seconds=%.1f",
         settings.llm_model,
         settings.llm_base_url or "default",
         bool(settings.llm_api_key),
+        settings.llm_timeout_seconds,
     )
     return ChatOpenAI(**kwargs)
