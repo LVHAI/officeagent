@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from deepagents import create_deep_agent
@@ -39,9 +40,18 @@ titles, and retrieval timestamps.
 """.strip()
 
 REPORT_PROMPT = """
-You are the Report Agent. Aggregate validated outputs from other agents,
-separate facts from recommendations, preserve citations, and explicitly list
-partial or failed agent results. Never invent evidence.
+You are the Report Agent. Aggregate validated outputs from other agents.
+Return ONLY valid JSON matching this schema:
+{
+  "summary": "string",
+  "findings": [{"title": "string", "evidence": "string", "confidence": 0.0}],
+  "recommendations": ["string"],
+  "sources": [{"kind": "string", "title": "string", "uri": "string"}],
+  "partial_results": ["string"]
+}
+Separate facts from recommendations, preserve citations, and explicitly list
+partial or failed agent results. Never invent evidence. Confidence must be a
+number between 0 and 1. Do not wrap the JSON in Markdown fences.
 """.strip()
 
 
@@ -117,10 +127,42 @@ def create_web_agent(tools=None):
     )
 
 
-def create_report_agent():
-    return create_agent(
-        model=build_chat_model(),
-        tools=[],
-        system_prompt=REPORT_PROMPT,
-        response_format=AnalysisReport,
+def _report_json_prompt(context: str) -> str:
+    return (
+        "Produce the final enterprise analysis report from the validated context below. "
+        "Return only one JSON object matching the Report Agent schema in the system prompt.\n\n"
+        f"Context:\n{context}"
     )
+
+
+def _parse_report_response(content: Any) -> AnalysisReport:
+    if isinstance(content, dict):
+        return AnalysisReport.model_validate(content)
+    text = str(content).strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+    try:
+        return AnalysisReport.model_validate_json(text)
+    except Exception:
+        # Accept a JSON object embedded in a short model response, without
+        # silently accepting arbitrary prose as a report.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("Report Agent returned non-JSON output")
+        return AnalysisReport.model_validate(json.loads(text[start : end + 1]))
+
+
+def create_report_agent():
+    model = build_chat_model()
+
+    async def report_node(request: dict[str, Any]) -> dict[str, Any]:
+        messages = request.get("messages", [])
+        context = messages[-1].get("content", "") if messages else ""
+        response = await model.ainvoke(_report_json_prompt(str(context)))
+        report = _parse_report_response(response.content)
+        return {"messages": [{"role": "assistant", "content": report.model_dump_json()}], "report": report}
+
+    return report_node
