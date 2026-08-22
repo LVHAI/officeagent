@@ -19,10 +19,14 @@ class Settings(BaseSettings):
     milvus_host: str = "localhost"
     milvus_port: int = 19530
 
-    crm_mcp_url: str = "http://localhost:8101/mcp"
-    database_mcp_url: str = "http://localhost:8102/mcp"
-    knowledge_mcp_url: str = "http://localhost:8103/mcp"
-    report_mcp_url: str = "http://localhost:8104/mcp"
+    # Use IPv4 explicitly for local Docker-published ports. On macOS,
+    # localhost may resolve to ::1 first while Docker Desktop's published
+    # port is served through IPv4, causing connection resets during MCP
+    # discovery.
+    crm_mcp_url: str = "http://127.0.0.1:8101/mcp"
+    database_mcp_url: str = "http://127.0.0.1:8102/mcp"
+    knowledge_mcp_url: str = "http://127.0.0.1:8103/mcp"
+    report_mcp_url: str = "http://127.0.0.1:8104/mcp"
 
     llm_api_key: str | None = None
     llm_base_url: str | None = None
