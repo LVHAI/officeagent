@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfWriter
 
 from app.rag.loader import DocumentLoader
 
