@@ -26,6 +26,10 @@ class EmbeddingService:
         """批量生成文档向量，供索引构建使用。"""
         return await self._embeddings.aembed_documents(list(texts))
 
+    def embed_documents_sync(self, texts: Sequence[str]) -> list[list[float]]:
+        """同步生成向量，供 Semantic Chunking 的边界判断使用。"""
+        return self._embeddings.embed_documents(list(texts))
+
     async def embed_query(self, text: str) -> list[float]:
         """生成查询向量，供 Milvus 向量检索使用。"""
         return await self._embeddings.aembed_query(text)
