@@ -35,7 +35,13 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_model: str = "qwen-plus"
     llm_timeout_seconds: float = 30.0
-    embedding_model: str = "text-embedding-3-small"
+
+    # DashScope's OpenAI-compatible embedding endpoint does not provide
+    # OpenAI's text-embedding-3-small. Use a Model Studio embedding model.
+    # The embedding service reuses llm_api_key/llm_base_url unless a
+    # dedicated embedding provider is introduced later.
+    embedding_model: str = "text-embedding-v4"
+
     tavily_api_key: str | None = None
 
     @property
