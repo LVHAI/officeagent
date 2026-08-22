@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
 import logging
+import time
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from app.agents.mcp_registry import mcp_registry
 from app.api.analysis import initialize_task_store
@@ -10,6 +12,7 @@ from app.core.checkpoint import close_checkpointer, initialize_checkpointer
 from app.core.config import settings
 from app.core.health import dependency_status
 
+logging.getLogger().setLevel(logging.INFO)
 logging.getLogger("app").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,41 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="OfficeAgent", version="0.1.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid4())
+    started = time.perf_counter()
+    logger.info(
+        "http.request.start request_id=%s method=%s path=%s",
+        request_id,
+        request.method,
+        request.url.path,
+    )
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "http.request.failed request_id=%s method=%s path=%s elapsed_ms=%.1f",
+            request_id,
+            request.method,
+            request.url.path,
+            (time.perf_counter() - started) * 1000,
+        )
+        raise
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "http.request.completed request_id=%s method=%s path=%s status=%d elapsed_ms=%.1f",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        (time.perf_counter() - started) * 1000,
+    )
+    return response
+
+
 app.include_router(analysis_router)
 
 
