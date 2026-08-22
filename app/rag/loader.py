@@ -56,7 +56,13 @@ class DocumentLoader:
         return "\n".join(blocks)
 
     def resolve_type(self, path: str | Path, corpus_root: str | Path | None = None) -> str:
-        """Resolve the intended chunking strategy from the corpus folder."""
+        """Resolve the intended chunking strategy from the corpus folder.
+
+        The corpus root may itself contain a wrapper directory such as ``data/rag``.
+        Therefore the strategy is resolved from the first path component that is one
+        of the supported strategy folders, rather than requiring it to be directly
+        under ``corpus_root``.
+        """
         file_path = Path(path)
         if corpus_root is not None:
             root = Path(corpus_root).resolve()
@@ -65,14 +71,23 @@ class DocumentLoader:
                 relative = resolved_path.relative_to(root)
             except ValueError:
                 return DocumentTypeClassifier().classify(file_path.name, self.load(file_path))
-            if len(relative.parts) >= 2:
-                strategy = relative.parts[0].lower()
-                if strategy not in SUPPORTED_CHUNKING_STRATEGIES:
+
+            parts = relative.parts[:-1]  # exclude the filename
+            for part in parts:
+                strategy = part.lower()
+                if strategy in SUPPORTED_CHUNKING_STRATEGIES:
+                    return strategy
+
+            # Preserve the explicit-folder validation for a corpus whose immediate
+            # child is intended to be a strategy directory, while allowing wrappers
+            # such as data/rag/<strategy>/... when the strategy exists deeper down.
+            if parts:
+                immediate = parts[0].lower()
+                if immediate not in {"rag", "data", "documents", "knowledge"}:
                     raise ValueError(
-                        f"unsupported RAG chunking strategy folder: {strategy!r}; "
+                        f"unsupported RAG chunking strategy folder: {immediate!r}; "
                         f"expected one of {sorted(SUPPORTED_CHUNKING_STRATEGIES)}"
                     )
-                return strategy
         return DocumentTypeClassifier().classify(file_path.name, self.load(file_path))
 
     def load_corpus(self, corpus_root: str | Path) -> list[LoadedDocument]:
