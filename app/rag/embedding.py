@@ -1,37 +1,108 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
-from langchain_openai import OpenAIEmbeddings
+import httpx
 
 from app.core.config import settings
 
 
 class EmbeddingService:
-    """统一封装 Embedding Provider，支持 OpenAI-compatible API。"""
+    """DashScope Embedding HTTP client.
 
-    def __init__(self) -> None:
-        kwargs: dict = {}
-        if settings.llm_api_key:
-            kwargs["api_key"] = settings.llm_api_key
-        if settings.llm_base_url:
-            kwargs["base_url"] = settings.llm_base_url
-        # DashScope 的 OpenAI-compatible Embedding API 接收原始字符串，
-        # 不应由 langchain-openai 预先做 tiktoken 编码后发送 token ids。
-        self._embeddings = OpenAIEmbeddings(
-            model=settings.embedding_model,
-            tiktoken_enabled=False,
-            **kwargs,
-        )
+    DashScope's OpenAI-compatible embedding endpoint accepts raw text. We do
+    not use LangChain's OpenAIEmbeddings here because its tokenizer path can
+    interpret the DashScope model name as a Hugging Face tokenizer identifier.
+    """
+
+    def __init__(self, transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None) -> None:
+        if not settings.llm_api_key:
+            raise ValueError("LLM_API_KEY is required for DashScope embeddings")
+        self._url = f"{settings.llm_base_url.rstrip('/')}/embeddings"
+        self._headers = {
+            "Authorization": f"Bearer {settings.llm_api_key}",
+            "Content-Type": "application/json",
+        }
+        self._timeout = settings.llm_timeout_seconds
+        self._batch_size = 10
+        self._transport = transport
+
+    @staticmethod
+    def _vectors(payload: dict[str, Any], expected: int) -> list[list[float]]:
+        data = payload.get("data")
+        if not isinstance(data, list) or len(data) != expected:
+            raise RuntimeError("DashScope embedding response has invalid data length")
+
+        ordered = sorted(data, key=lambda item: int(item.get("index", 0)))
+        vectors: list[list[float]] = []
+        for item in ordered:
+            embedding = item.get("embedding")
+            if not isinstance(embedding, list) or not embedding:
+                raise RuntimeError("DashScope embedding response contains an empty vector")
+            vectors.append([float(value) for value in embedding])
+        return vectors
+
+    def _request_sync(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        payload = {
+            "model": settings.embedding_model,
+            "input": list(texts),
+            "encoding_format": "float",
+        }
+        with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
+            response = client.post(self._url, headers=self._headers, json=payload)
+        if response.is_error:
+            detail = response.text
+            try:
+                error = response.json().get("error", {})
+                detail = f"{error.get('code', '')}: {error.get('message', detail)}"
+            except ValueError:
+                pass
+            raise RuntimeError(f"DashScope embedding request failed ({response.status_code}): {detail}")
+        return self._vectors(response.json(), len(texts))
+
+    async def _request_async(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        payload = {
+            "model": settings.embedding_model,
+            "input": list(texts),
+            "encoding_format": "float",
+        }
+        async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
+            response = await client.post(self._url, headers=self._headers, json=payload)
+        if response.is_error:
+            detail = response.text
+            try:
+                error = response.json().get("error", {})
+                detail = f"{error.get('code', '')}: {error.get('message', detail)}"
+            except ValueError:
+                pass
+            raise RuntimeError(f"DashScope embedding request failed ({response.status_code}): {detail}")
+        return self._vectors(response.json(), len(texts))
 
     async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-        """批量生成文档向量，供索引构建使用。"""
-        return await self._embeddings.aembed_documents(list(texts))
+        """Batch document embeddings, respecting DashScope's 10-item limit."""
+        values = list(texts)
+        vectors: list[list[float]] = []
+        for start in range(0, len(values), self._batch_size):
+            vectors.extend(await self._request_async(values[start : start + self._batch_size]))
+        return vectors
 
     def embed_documents_sync(self, texts: Sequence[str]) -> list[list[float]]:
-        """同步生成向量，供 Semantic Chunking 的边界判断使用。"""
-        return self._embeddings.embed_documents(list(texts))
+        """Synchronous document embeddings for semantic chunk boundary detection."""
+        values = list(texts)
+        vectors: list[list[float]] = []
+        for start in range(0, len(values), self._batch_size):
+            vectors.extend(self._request_sync(values[start : start + self._batch_size]))
+        return vectors
 
     async def embed_query(self, text: str) -> list[float]:
-        """生成查询向量，供 Milvus 向量检索使用。"""
-        return await self._embeddings.aembed_query(text)
+        """Generate a query vector with the same model used for ingestion."""
+        return (await self._request_async([text]))[0]
+
+    def embed_query_sync(self, text: str) -> list[float]:
+        """Synchronous query embedding helper."""
+        return self._request_sync([text])[0]
