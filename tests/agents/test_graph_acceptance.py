@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from app.agents.graph import build_workflow, new_task_state, supervisor_node
+from app.core.config import settings
 
 
 @pytest.mark.asyncio
@@ -18,7 +19,8 @@ async def test_supervisor_failure_isolated_as_partial_result():
     assert result["traces"][0]["status"] == "failed"
 
 
-def test_workflow_uses_memory_checkpoint_for_tests():
+def test_workflow_uses_memory_checkpoint_for_tests(monkeypatch):
+    monkeypatch.setattr(settings, "environment", "test")
     workflow = build_workflow()
     assert workflow is not None
 
