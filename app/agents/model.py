@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from langchain_openai import ChatOpenAI
 
@@ -37,3 +38,38 @@ def build_chat_model() -> ChatOpenAI:
         settings.llm_timeout_seconds,
     )
     return ChatOpenAI(**kwargs)
+
+
+async def ainvoke_chat_model(model: ChatOpenAI, prompt: str, *, agent_id: str, task_id: str) -> object:
+    """Invoke the model with explicit start/completion/failure diagnostics."""
+    started = time.perf_counter()
+    logger.info(
+        "llm.invoke.start task_id=%s agent=%s provider=%s model=%s prompt_length=%d",
+        task_id,
+        agent_id,
+        settings.llm_provider,
+        settings.llm_model,
+        len(prompt),
+    )
+    try:
+        response = await model.ainvoke(prompt)
+        content = getattr(response, "content", None)
+        logger.info(
+            "llm.invoke.completed task_id=%s agent=%s elapsed_ms=%.1f response_type=%s content_length=%d",
+            task_id,
+            agent_id,
+            (time.perf_counter() - started) * 1000,
+            type(response).__name__,
+            len(str(content)) if content is not None else 0,
+        )
+        return response
+    except Exception as exc:
+        logger.exception(
+            "llm.invoke.failed task_id=%s agent=%s elapsed_ms=%.1f error_type=%s error=%s",
+            task_id,
+            agent_id,
+            (time.perf_counter() - started) * 1000,
+            type(exc).__name__,
+            exc,
+        )
+        raise
