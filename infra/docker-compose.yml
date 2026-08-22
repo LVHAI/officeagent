@@ -149,7 +149,7 @@ services:
       timeout: 3s
       retries: 10
 
-a volumes:
+volumes:
   postgres-data:
   redis-data:
   etcd-data:
