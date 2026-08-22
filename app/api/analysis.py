@@ -35,6 +35,13 @@ def configure_task_store(store: TaskStore) -> None:
     _task_store = store
 
 
+def initialize_task_store() -> None:
+    """Initialize the configured persistent task store before serving requests."""
+    setup = getattr(_task_store, "setup", None)
+    if callable(setup):
+        setup()
+
+
 async def _save(record: TaskRecord) -> None:
     # psycopg 是同步驱动，放入线程池避免阻塞 Agent 事件循环。
     await to_thread(_task_store.save, record)
