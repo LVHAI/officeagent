@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.agents.rag import KnowledgeChunk
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.agents.rag import KnowledgeChunk
 
 
 class KeywordReranker:
