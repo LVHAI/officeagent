@@ -56,19 +56,30 @@ async def _log_agent_progress(task: asyncio.Task, task_id: str, agent_id: str, s
 async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_id: str | None = None):
     trace = AgentTrace(task_id=task_id, agent_id=agent_id, parent_agent_id=parent_agent_id)
     started = time.perf_counter()
-    logger.info("agent.invoke.start task_id=%s agent=%s parent=%s", task_id, agent_id, parent_agent_id or "-")
+    logger.info(
+        "agent.invoke.start task_id=%s agent=%s parent=%s input_length=%d agent_type=%s",
+        task_id,
+        agent_id,
+        parent_agent_id or "-",
+        len(query),
+        type(agent).__name__,
+    )
     operation = asyncio.create_task(
-        agent.ainvoke({"messages": [{"role": "user", "content": query}]})
+        agent.ainvoke({
+            "messages": [{"role": "user", "content": query}],
+            "task_id": task_id,
+        })
     )
     progress_task = asyncio.create_task(_log_agent_progress(operation, task_id, agent_id, started))
     try:
         result = await run_with_timeout(operation, timeout=AGENT_TIMEOUT_SECONDS)
         trace.finish()
         logger.info(
-            "agent.invoke.completed task_id=%s agent=%s elapsed_ms=%.1f",
+            "agent.invoke.completed task_id=%s agent=%s elapsed_ms=%.1f result_type=%s",
             task_id,
             agent_id,
             (time.perf_counter() - started) * 1000,
+            type(result).__name__,
         )
         return result, trace.to_dict()
     except asyncio.TimeoutError:
@@ -87,7 +98,13 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_i
         raise
     except Exception as exc:
         trace.finish(status="failed", error=str(exc))
-        logger.exception("agent.invoke.failed task_id=%s agent=%s elapsed_ms=%.1f", task_id, agent_id, (time.perf_counter() - started) * 1000)
+        logger.exception(
+            "agent.invoke.failed task_id=%s agent=%s elapsed_ms=%.1f error_type=%s",
+            task_id,
+            agent_id,
+            (time.perf_counter() - started) * 1000,
+            type(exc).__name__,
+        )
         raise
     finally:
         progress_task.cancel()
@@ -116,7 +133,7 @@ def _supervisor_tools() -> dict[str, list[Any]]:
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
     task_id = state["task_id"]
     started = asyncio.get_running_loop().time()
-    logger.info("workflow.supervisor.start task_id=%s", task_id)
+    logger.info("workflow.supervisor.start task_id=%s query_length=%d", task_id, len(state["query"]))
     try:
         tools = _supervisor_tools()
         logger.info(
@@ -165,7 +182,13 @@ async def report_node(state: AgentState) -> dict[str, Any]:
         "delegations": state.get("delegations", []),
     }
     started = time.perf_counter()
-    logger.info("workflow.report.start task_id=%s", task_id)
+    logger.info(
+        "workflow.report.start task_id=%s context_length=%d supervisor_result_type=%s errors=%d",
+        task_id,
+        len(str(context)),
+        type(state.get("supervisor_result")).__name__,
+        len(state.get("errors", [])),
+    )
     try:
         result, trace = await _invoke(
             create_report_agent(), str(context), "report", task_id, parent_agent_id="supervisor"
@@ -176,7 +199,7 @@ async def report_node(state: AgentState) -> dict[str, Any]:
         logger.warning("workflow.report.cancelled task_id=%s", task_id)
         raise
     except Exception as exc:
-        logger.exception("workflow.report.failed task_id=%s elapsed_ms=%.1f", task_id, (time.perf_counter() - started) * 1000)
+        logger.exception("workflow.report.failed task_id=%s elapsed_ms=%.1f error_type=%s", task_id, (time.perf_counter() - started) * 1000, type(exc).__name__)
         return {
             "status": "partial",
             "errors": [f"report: {exc}"],
