@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from typing import Any
 
 from deepagents import create_deep_agent
@@ -8,8 +10,10 @@ from langchain.agents import create_agent
 from langchain_tavily import TavilySearch
 
 from app.agents.report_models import AnalysisReport
-from app.agents.model import build_chat_model
+from app.agents.model import build_chat_model, ainvoke_chat_model
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 SUPERVISOR_PROMPT = """
@@ -69,6 +73,13 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
     model = build_chat_model()
     web_tool = build_tavily_search() if web_tools is None else None
     external_tools = web_tools if web_tools is not None else ([web_tool] if web_tool is not None else [])
+    logger.info(
+        "agent.create supervisor model=%s knowledge_tools=%d tool_tools=%d web_tools=%d",
+        settings.llm_model,
+        len(knowledge_tools or []),
+        len(tool_tools or tools or []),
+        len(external_tools),
+    )
     return create_deep_agent(
         model=model,
         system_prompt=SUPERVISOR_PROMPT,
@@ -160,11 +171,52 @@ class _ReportAgent:
         self._model = model
 
     async def ainvoke(self, request: dict[str, Any]) -> AnalysisReport:
+        task_id = str(request.get("task_id", "unknown"))
         messages = request.get("messages", [])
         context = messages[-1].get("content", "") if messages else ""
-        response = await self._model.ainvoke(_report_json_prompt(str(context)))
-        return _parse_report_response(response.content)
+        logger.info(
+            "report.invoke.start task_id=%s model=%s context_length=%d",
+            task_id,
+            settings.llm_model,
+            len(str(context)),
+        )
+        prompt = _report_json_prompt(str(context))
+        logger.info("report.prompt.ready task_id=%s prompt_length=%d", task_id, len(prompt))
+        started = time.perf_counter()
+        response = await ainvoke_chat_model(
+            self._model,
+            prompt,
+            agent_id="report",
+            task_id=task_id,
+        )
+        content = getattr(response, "content", "")
+        logger.info(
+            "report.response.received task_id=%s elapsed_ms=%.1f content_length=%d",
+            task_id,
+            (time.perf_counter() - started) * 1000,
+            len(str(content)),
+        )
+        try:
+            report = _parse_report_response(content)
+        except Exception as exc:
+            logger.exception(
+                "report.response.parse_failed task_id=%s content_preview=%r error=%s",
+                task_id,
+                str(content)[:500],
+                exc,
+            )
+            raise
+        logger.info(
+            "report.invoke.completed task_id=%s elapsed_ms=%.1f findings=%d recommendations=%d sources=%d",
+            task_id,
+            (time.perf_counter() - started) * 1000,
+            len(report.findings),
+            len(report.recommendations),
+            len(report.sources),
+        )
+        return report
 
 
 def create_report_agent():
+    logger.info("agent.create report model=%s", settings.llm_model)
     return _ReportAgent(build_chat_model())
