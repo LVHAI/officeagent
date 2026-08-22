@@ -55,6 +55,20 @@ Final Answer + Sources
 - Redis — cache/session coordination
 - Qwen / DeepSeek / OpenAI-compatible LLMs
 
+## RAG Corpus Layout
+
+The RAG corpus is organized by the intended chunking strategy so that ingestion is explicit and easy to inspect:
+
+```text
+data/rag/
+├── policy/          # policy_nodes / article-level chunks
+├── faq/             # FAQ-oriented chunks
+├── parent_child/    # parent-child chunks
+└── semantic/        # semantic/baseline chunks
+```
+
+For documents under `data/rag/<strategy>/`, the first-level directory name is authoritative and determines `doc_type`. Files outside a strategy directory retain the legacy content-based classifier as a compatibility fallback. The current loader supports `.txt` and `.md` source documents.
+
 ## Local macOS Development
 
 Requirements:
@@ -108,6 +122,7 @@ make infra-reset
 
 - [Specification](docs/spec.md)
 - [Implementation Plan](docs/plan.md)
+- [RAG Chunking Folder Plan](plan.md)
 
 ## Roadmap
 
@@ -115,6 +130,7 @@ make infra-reset
 - [x] DeepAgents runtime skeleton
 - [x] LangGraph workflow skeleton
 - [x] RAG chunking / hybrid retrieval foundation
+- [x] RAG strategy-folder corpus organization
 - [x] Milvus repository foundation
 - [x] MCP client / Skill registry foundation
 - [x] Docker external infrastructure
