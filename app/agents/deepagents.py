@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
 
 from deepagents import create_deep_agent
 from langchain.agents import create_agent
+from langchain_core.tools import tool
 from langchain_tavily import TavilySearch
 
-from app.agents.report_models import AnalysisReport
+from app.agents.report_models import AnalysisReport, ReportFinding, ReportSource
 from app.agents.model import build_chat_model, ainvoke_chat_model
 from app.core.config import settings
 
@@ -45,22 +45,23 @@ titles, and retrieval timestamps.
 
 REPORT_PROMPT = """
 You are the Report Agent. Aggregate validated outputs from other agents.
-Return ONLY one JSON object matching exactly this schema:
-{
-  "summary": "string",
-  "findings": [{"title": "string", "evidence": "string", "confidence": 0.0}],
-  "recommendations": ["string"],
-  "sources": [{"kind": "string", "title": "string", "uri": "string"}],
-  "partial_results": ["string"]
-}
-The keys must be exactly: summary, findings, recommendations, sources, partial_results.
-Do not add report_id, title, date_generated, executive_summary, detailed_analysis,
-or any other top-level fields. recommendations MUST be an array of strings.
-findings MUST be an array of objects. sources MUST be an array of objects.
+You MUST call the submit_analysis_report tool exactly once with the final report.
+Do not return a report as free-form JSON or Markdown. Do not invent evidence.
 Separate facts from recommendations, preserve citations, and explicitly list
-partial or failed agent results. Never invent evidence. Confidence must be a
-number between 0 and 1. Do not wrap the JSON in Markdown fences.
+partial or failed agent results. Confidence must be between 0 and 1.
 """.strip()
+
+
+@tool
+def submit_analysis_report(
+    summary: str,
+    findings: list[ReportFinding],
+    recommendations: list[str],
+    sources: list[ReportSource],
+    partial_results: list[str],
+) -> str:
+    """Submit the final validated enterprise analysis report."""
+    return "analysis report accepted"
 
 
 def build_tavily_search() -> Any:
@@ -130,160 +131,95 @@ def create_web_agent(tools=None):
     return create_agent(model=build_chat_model(), tools=web_tools, system_prompt=WEB_PROMPT)
 
 
-def _report_json_prompt(context: str) -> str:
-    return (
-        "Produce the final enterprise analysis report from the validated context below. "
-        "Return only one JSON object matching EXACTLY the five-key Report Agent schema "
-        "in the system prompt. Do not use an alternative report schema.\n\n"
-        f"Context:\n{context}"
-    )
-
-
-def _recommendation_to_text(item: Any) -> str:
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        description = item.get("description") or item.get("recommendation") or item.get("action")
-        actions = item.get("action_items")
-        if isinstance(actions, list) and actions:
-            action_text = "; ".join(str(action) for action in actions)
-            if description:
-                return f"{description} ({action_text})"
-            return action_text
-        if description:
-            return str(description)
-        return json.dumps(item, ensure_ascii=False)
-    return str(item)
-
-
-def _coerce_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize common Qwen/report-template variants into the internal schema."""
-    if "summary" not in payload and payload.get("executive_summary") is not None:
-        payload["summary"] = payload["executive_summary"]
-
-    recommendations = payload.get("recommendations", [])
-    if isinstance(recommendations, str):
-        recommendations = [recommendations]
-    elif recommendations is None:
-        recommendations = []
-    elif isinstance(recommendations, list):
-        recommendations = [_recommendation_to_text(item) for item in recommendations]
-    else:
-        recommendations = [_recommendation_to_text(recommendations)]
-    payload["recommendations"] = recommendations
-
-    findings = payload.get("findings")
-    if findings is None:
-        findings = []
-        detailed = payload.get("detailed_analysis")
-        if isinstance(detailed, dict):
-            for key, value in detailed.items():
-                if isinstance(value, str):
-                    findings.append({"title": str(key), "evidence": value, "confidence": 1.0})
-                elif isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, dict):
-                            title = item.get("capability") or item.get("title") or str(key)
-                            evidence = item.get("description") or item.get("evidence") or json.dumps(item, ensure_ascii=False)
-                            findings.append({"title": str(title), "evidence": str(evidence), "confidence": 1.0})
-                        elif item is not None:
-                            findings.append({"title": str(key), "evidence": str(item), "confidence": 1.0})
-                elif value is not None:
-                    findings.append({"title": str(key), "evidence": str(value), "confidence": 1.0})
-        payload["findings"] = findings
-    elif isinstance(findings, list):
-        normalized_findings = []
-        for item in findings:
-            if isinstance(item, dict):
-                normalized_findings.append(item)
-            elif item is not None:
-                normalized_findings.append({"title": "Finding", "evidence": str(item), "confidence": 1.0})
-        payload["findings"] = normalized_findings
-
-    if payload.get("sources") is None:
-        payload["sources"] = []
-    if payload.get("partial_results") is None:
-        payload["partial_results"] = []
-
-    for key in ("delegations", "errors"):
-        value = payload.get(key)
-        if isinstance(value, list) and value:
-            partial_results = list(payload.get("partial_results") or [])
-            partial_results.extend(json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else str(item) for item in value)
-            payload["partial_results"] = partial_results
-
-    return payload
-
-
-def _parse_report_response(content: Any) -> AnalysisReport:
-    if isinstance(content, dict):
-        return AnalysisReport.model_validate(_coerce_report_payload(dict(content)))
-    text = str(content).strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 3:
-            text = "\n".join(lines[1:-1]).strip()
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("Report Agent returned non-JSON output")
-        payload = json.loads(text[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("Report Agent JSON root must be an object")
-    return AnalysisReport.model_validate(_coerce_report_payload(payload))
-
-
 class _ReportAgent:
     """Adapter exposing the same ainvoke contract used by graph._invoke."""
 
     def __init__(self, model: Any):
         self._model = model
+        self._tool_model = model.bind_tools(
+            [submit_analysis_report],
+            tool_choice="submit_analysis_report",
+        )
+
+    @staticmethod
+    def _extract_report(response: Any) -> AnalysisReport:
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if not tool_calls:
+            raise ValueError("Report Agent did not call submit_analysis_report")
+
+        if len(tool_calls) != 1:
+            raise ValueError(
+                f"Report Agent must call submit_analysis_report exactly once; got {len(tool_calls)}"
+            )
+
+        call = tool_calls[0]
+        name = call.get("name")
+        if name != "submit_analysis_report":
+            raise ValueError(f"Unexpected Report Agent tool call: {name!r}")
+
+        args = call.get("args")
+        if not isinstance(args, dict):
+            raise ValueError("submit_analysis_report tool arguments must be an object")
+
+        try:
+            return AnalysisReport.model_validate(args)
+        except Exception as exc:
+            logger.exception(
+                "report.validation.failed tool=submit_analysis_report error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+            )
+            raise
 
     async def ainvoke(self, request: dict[str, Any]) -> AnalysisReport:
         task_id = str(request.get("task_id", "unknown"))
         messages = request.get("messages", [])
         context = messages[-1].get("content", "") if messages else ""
         logger.info(
-            "report.invoke.start task_id=%s model=%s context_length=%d",
+            "report.invoke.start task_id=%s model=%s context_length=%d tool=submit_analysis_report",
             task_id,
             settings.llm_model,
             len(str(context)),
         )
-        prompt = _report_json_prompt(str(context))
-        logger.info("report.prompt.ready task_id=%s prompt_length=%d", task_id, len(prompt))
+
         started = time.perf_counter()
-        response = await ainvoke_chat_model(self._model, prompt, agent_id="report", task_id=task_id)
-        content = getattr(response, "content", "")
-        logger.info(
-            "report.response.received task_id=%s elapsed_ms=%.1f content_length=%d",
-            task_id,
-            (time.perf_counter() - started) * 1000,
-            len(str(content)),
-        )
         try:
-            report = _parse_report_response(content)
+            response = await ainvoke_chat_model(
+                self._tool_model,
+                f"{REPORT_PROMPT}\n\nValidated context:\n{context}",
+                agent_id="report",
+                task_id=task_id,
+            )
+            tool_calls = getattr(response, "tool_calls", None) or []
+            logger.info(
+                "report.tool_call.received task_id=%s call_count=%d names=%s",
+                task_id,
+                len(tool_calls),
+                [call.get("name") for call in tool_calls],
+            )
+            report = self._extract_report(response)
         except Exception as exc:
             logger.exception(
-                "report.response.parse_failed task_id=%s content_preview=%r error=%s",
+                "report.invoke.failed task_id=%s elapsed_ms=%.1f error_type=%s error=%s",
                 task_id,
-                str(content)[:500],
+                (time.perf_counter() - started) * 1000,
+                type(exc).__name__,
                 exc,
             )
             raise
+
         logger.info(
-            "report.invoke.completed task_id=%s elapsed_ms=%.1f findings=%d recommendations=%d sources=%d",
+            "report.invoke.completed task_id=%s elapsed_ms=%.1f findings=%d recommendations=%d sources=%d partial_results=%d",
             task_id,
             (time.perf_counter() - started) * 1000,
             len(report.findings),
             len(report.recommendations),
             len(report.sources),
+            len(report.partial_results),
         )
         return report
 
 
 def create_report_agent():
-    logger.info("agent.create report model=%s", settings.llm_model)
+    logger.info("agent.create report model=%s tool=submit_analysis_report", settings.llm_model)
     return _ReportAgent(build_chat_model())
