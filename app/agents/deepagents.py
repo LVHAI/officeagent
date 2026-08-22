@@ -45,7 +45,7 @@ titles, and retrieval timestamps.
 
 REPORT_PROMPT = """
 You are the Report Agent. Aggregate validated outputs from other agents.
-Return ONLY valid JSON matching this schema:
+Return ONLY one JSON object matching exactly this schema:
 {
   "summary": "string",
   "findings": [{"title": "string", "evidence": "string", "confidence": 0.0}],
@@ -53,6 +53,10 @@ Return ONLY valid JSON matching this schema:
   "sources": [{"kind": "string", "title": "string", "uri": "string"}],
   "partial_results": ["string"]
 }
+The keys must be exactly: summary, findings, recommendations, sources, partial_results.
+Do not add report_id, title, date_generated, executive_summary, detailed_analysis,
+or any other top-level fields. recommendations MUST be an array of strings.
+findings MUST be an array of objects. sources MUST be an array of objects.
 Separate facts from recommendations, preserve citations, and explicitly list
 partial or failed agent results. Never invent evidence. Confidence must be a
 number between 0 and 1. Do not wrap the JSON in Markdown fences.
@@ -110,19 +114,11 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
 
 
 def create_knowledge_agent(tools=None):
-    return create_agent(
-        model=build_chat_model(),
-        tools=tools or [],
-        system_prompt=KNOWLEDGE_PROMPT,
-    )
+    return create_agent(model=build_chat_model(), tools=tools or [], system_prompt=KNOWLEDGE_PROMPT)
 
 
 def create_tool_agent(tools=None):
-    return create_deep_agent(
-        model=build_chat_model(),
-        tools=tools or [],
-        system_prompt=TOOL_PROMPT,
-    )
+    return create_deep_agent(model=build_chat_model(), tools=tools or [], system_prompt=TOOL_PROMPT)
 
 
 def create_web_agent(tools=None):
@@ -131,37 +127,76 @@ def create_web_agent(tools=None):
         tavily = build_tavily_search()
         if tavily is not None:
             web_tools = [tavily]
-    return create_agent(
-        model=build_chat_model(),
-        tools=web_tools,
-        system_prompt=WEB_PROMPT,
-    )
+    return create_agent(model=build_chat_model(), tools=web_tools, system_prompt=WEB_PROMPT)
 
 
 def _report_json_prompt(context: str) -> str:
     return (
         "Produce the final enterprise analysis report from the validated context below. "
-        "Return only one JSON object matching the Report Agent schema in the system prompt.\n\n"
+        "Return only one JSON object matching EXACTLY the five-key Report Agent schema "
+        "in the system prompt. Do not use an alternative report schema.\n\n"
         f"Context:\n{context}"
     )
 
 
+def _coerce_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize common Qwen/report-template variants into the internal schema."""
+    if "summary" not in payload and payload.get("executive_summary") is not None:
+        payload["summary"] = payload["executive_summary"]
+
+    recommendations = payload.get("recommendations", [])
+    if isinstance(recommendations, str):
+        payload["recommendations"] = [recommendations]
+    elif recommendations is None:
+        payload["recommendations"] = []
+
+    findings = payload.get("findings")
+    if findings is None:
+        findings = []
+        detailed = payload.get("detailed_analysis")
+        if isinstance(detailed, dict):
+            for key, value in detailed.items():
+                if isinstance(value, str):
+                    findings.append({"title": str(key), "evidence": value, "confidence": 1.0})
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            title = item.get("capability") or item.get("title") or str(key)
+                            evidence = item.get("description") or item.get("evidence") or json.dumps(item, ensure_ascii=False)
+                            findings.append({"title": str(title), "evidence": str(evidence), "confidence": 1.0})
+                        elif item is not None:
+                            findings.append({"title": str(key), "evidence": str(item), "confidence": 1.0})
+                elif value is not None:
+                    findings.append({"title": str(key), "evidence": str(value), "confidence": 1.0})
+        payload["findings"] = findings
+
+    if payload.get("sources") is None:
+        payload["sources"] = []
+    if payload.get("partial_results") is None:
+        payload["partial_results"] = []
+
+    return payload
+
+
 def _parse_report_response(content: Any) -> AnalysisReport:
     if isinstance(content, dict):
-        return AnalysisReport.model_validate(content)
+        return AnalysisReport.model_validate(_coerce_report_payload(dict(content)))
     text = str(content).strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if len(lines) >= 3:
             text = "\n".join(lines[1:-1]).strip()
     try:
-        return AnalysisReport.model_validate_json(text)
-    except Exception:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
             raise ValueError("Report Agent returned non-JSON output")
-        return AnalysisReport.model_validate(json.loads(text[start : end + 1]))
+        payload = json.loads(text[start : end + 1])
+    if not isinstance(payload, dict):
+        raise ValueError("Report Agent JSON root must be an object")
+    return AnalysisReport.model_validate(_coerce_report_payload(payload))
 
 
 class _ReportAgent:
@@ -183,12 +218,7 @@ class _ReportAgent:
         prompt = _report_json_prompt(str(context))
         logger.info("report.prompt.ready task_id=%s prompt_length=%d", task_id, len(prompt))
         started = time.perf_counter()
-        response = await ainvoke_chat_model(
-            self._model,
-            prompt,
-            agent_id="report",
-            task_id=task_id,
-        )
+        response = await ainvoke_chat_model(self._model, prompt, agent_id="report", task_id=task_id)
         content = getattr(response, "content", "")
         logger.info(
             "report.response.received task_id=%s elapsed_ms=%.1f content_length=%d",
