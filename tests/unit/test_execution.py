@@ -4,6 +4,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agents.graph import build_workflow
+from app.core.config import settings
 from app.core.execution import gather_bounded, run_with_timeout
 
 
@@ -43,17 +44,9 @@ async def test_gather_bounded_limits_concurrency():
     assert peak <= 2
 
 
-def test_workflow_uses_checkpoint_store(monkeypatch):
+def test_workflow_uses_memory_checkpoint_for_test_environment(monkeypatch):
     # Mock Agent 工厂，测试只关注 LangGraph Checkpoint 配置，不触发真实模型调用。
-    class FakeAgent:
-        async def ainvoke(self, payload):
-            return {"messages": []}
-
-    monkeypatch.setattr("app.agents.graph.create_supervisor", lambda: FakeAgent())
-    monkeypatch.setattr("app.agents.graph.create_knowledge_agent", lambda: FakeAgent())
-    monkeypatch.setattr("app.agents.graph.create_tool_agent", lambda: FakeAgent())
-    monkeypatch.setattr("app.agents.graph.create_web_agent", lambda: FakeAgent())
-    monkeypatch.setattr("app.agents.graph.create_report_agent", lambda: FakeAgent())
+    monkeypatch.setattr(settings, "environment", "test")
 
     workflow = build_workflow()
     assert workflow.checkpointer is not None
