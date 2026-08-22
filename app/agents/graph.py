@@ -34,17 +34,35 @@ class AgentState(TypedDict, total=False):
 
 AGENT_TIMEOUT_SECONDS = 45.0
 GLOBAL_TIMEOUT_SECONDS = 120.0
+AGENT_PROGRESS_LOG_INTERVAL_SECONDS = 5.0
+
+
+async def _log_agent_progress(task: asyncio.Task, task_id: str, agent_id: str, started: float) -> None:
+    """Emit periodic progress so a long LLM/tool call is observable instead of looking hung."""
+    try:
+        while not task.done():
+            await asyncio.sleep(AGENT_PROGRESS_LOG_INTERVAL_SECONDS)
+            if not task.done():
+                logger.info(
+                    "agent.invoke.progress task_id=%s agent=%s elapsed_ms=%.1f",
+                    task_id,
+                    agent_id,
+                    (time.perf_counter() - started) * 1000,
+                )
+    except asyncio.CancelledError:
+        raise
 
 
 async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_id: str | None = None):
     trace = AgentTrace(task_id=task_id, agent_id=agent_id, parent_agent_id=parent_agent_id)
     started = time.perf_counter()
     logger.info("agent.invoke.start task_id=%s agent=%s parent=%s", task_id, agent_id, parent_agent_id or "-")
+    operation = asyncio.create_task(
+        agent.ainvoke({"messages": [{"role": "user", "content": query}]})
+    )
+    progress_task = asyncio.create_task(_log_agent_progress(operation, task_id, agent_id, started))
     try:
-        result = await run_with_timeout(
-            agent.ainvoke({"messages": [{"role": "user", "content": query}]}),
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
+        result = await run_with_timeout(operation, timeout=AGENT_TIMEOUT_SECONDS)
         trace.finish()
         logger.info(
             "agent.invoke.completed task_id=%s agent=%s elapsed_ms=%.1f",
@@ -53,6 +71,16 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_i
             (time.perf_counter() - started) * 1000,
         )
         return result, trace.to_dict()
+    except asyncio.TimeoutError:
+        trace.finish(status="failed", error=f"agent timeout after {AGENT_TIMEOUT_SECONDS:.1f}s")
+        logger.error(
+            "agent.invoke.timeout task_id=%s agent=%s timeout_seconds=%.1f elapsed_ms=%.1f",
+            task_id,
+            agent_id,
+            AGENT_TIMEOUT_SECONDS,
+            (time.perf_counter() - started) * 1000,
+        )
+        raise
     except asyncio.CancelledError:
         trace.finish(status="cancelled", error="agent task cancelled")
         logger.warning("agent.invoke.cancelled task_id=%s agent=%s", task_id, agent_id)
@@ -61,6 +89,9 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_i
         trace.finish(status="failed", error=str(exc))
         logger.exception("agent.invoke.failed task_id=%s agent=%s elapsed_ms=%.1f", task_id, agent_id, (time.perf_counter() - started) * 1000)
         raise
+    finally:
+        progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
 
 
 def _delegation(task_id: str, child: str, status: str, elapsed_ms: float = 0.0, error: str | None = None):
