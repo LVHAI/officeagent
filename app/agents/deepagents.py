@@ -46,7 +46,6 @@ partial or failed agent results. Never invent evidence.
 
 
 def build_tavily_search() -> Any:
-    """创建 Web Agent 专用 Tavily 工具；未配置 Key 时不在测试/离线环境实例化。"""
     if not settings.tavily_api_key:
         return None
     return TavilySearch(
@@ -56,11 +55,10 @@ def build_tavily_search() -> Any:
     )
 
 
-def create_supervisor():
+def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_tools=None):
     model = build_chat_model()
-    # Supervisor 使用 DeepAgents 的 task/subagents 完成真正的 Agentic Delegation。
-    web_tool = build_tavily_search()
-    tools = [web_tool] if web_tool is not None else []
+    web_tool = build_tavily_search() if web_tools is None else None
+    external_tools = web_tools if web_tools is not None else ([web_tool] if web_tool is not None else [])
     return create_deep_agent(
         model=model,
         system_prompt=SUPERVISOR_PROMPT,
@@ -70,21 +68,21 @@ def create_supervisor():
                 "description": "Retrieve and cite enterprise knowledge through the RAG pipeline.",
                 "system_prompt": KNOWLEDGE_PROMPT,
                 "model": model,
-                "tools": [],
+                "tools": knowledge_tools or [],
             },
             {
                 "name": "tool-agent",
                 "description": "Query enterprise systems through MCP skills and tools.",
                 "system_prompt": TOOL_PROMPT,
                 "model": model,
-                "tools": [],
+                "tools": tool_tools or tools or [],
             },
             {
                 "name": "web-agent",
                 "description": "Retrieve current external information with Tavily.",
                 "system_prompt": WEB_PROMPT,
                 "model": model,
-                "tools": tools,
+                "tools": external_tools,
             },
         ],
     )
@@ -99,7 +97,6 @@ def create_knowledge_agent(tools=None):
 
 
 def create_tool_agent(tools=None):
-    # Tool Agent 需要多步 MCP Tool Planning，因此使用 DeepAgents，但工具仍动态注入。
     return create_deep_agent(
         model=build_chat_model(),
         tools=tools or [],
@@ -121,7 +118,6 @@ def create_web_agent(tools=None):
 
 
 def create_report_agent():
-    # Report Agent 使用普通 Agent Runtime，并强制输出 AnalysisReport 结构。
     return create_agent(
         model=build_chat_model(),
         tools=[],
