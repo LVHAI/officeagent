@@ -11,11 +11,19 @@ _checkpointer: PostgresSaver | None = None
 
 
 def get_checkpointer():
-    """创建进程级 PostgreSQL Checkpointer，保证 API 请求之间共享持久化状态。"""
+    """创建进程级 PostgreSQL Checkpointer，并使用 autocommit 执行初始化迁移。"""
     global _pool, _checkpointer
     if _checkpointer is not None:
         return _checkpointer
-    _pool = ConnectionPool(settings.postgres_dsn, min_size=1, max_size=8, open=True)
+
+    # LangGraph PostgreSQL 初始化包含 CREATE INDEX CONCURRENTLY，必须在事务外执行。
+    _pool = ConnectionPool(
+        settings.postgres_dsn,
+        min_size=1,
+        max_size=8,
+        kwargs={"autocommit": True},
+        open=True,
+    )
     _checkpointer = PostgresSaver(_pool)
     _checkpointer.setup()
     return _checkpointer
