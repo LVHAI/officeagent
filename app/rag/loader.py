@@ -8,7 +8,7 @@ from pypdf import PdfReader
 
 
 SUPPORTED_CHUNKING_STRATEGIES = frozenset({"policy", "faq", "parent_child", "semantic"})
-SUPPORTED_SOURCE_SUFFIXES = frozenset({".txt", ".md", ".pdf", ".docx"})
+SUPPORTED_SOURCE_SUFFIXES = frozenset({".txt", ".md", ".pdf", ".docx", ".json"})
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ class DocumentLoader:
         suffix = file_path.suffix.lower()
         if suffix not in SUPPORTED_SOURCE_SUFFIXES:
             raise ValueError(f"unsupported document type: {suffix}")
-        if suffix in {".txt", ".md"}:
+        if suffix in {".txt", ".md", ".json"}:
             return file_path.read_text(encoding="utf-8")
         if suffix == ".pdf":
             return self._load_pdf(file_path)
