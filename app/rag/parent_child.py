@@ -32,38 +32,44 @@ def build_parent_child(document: str, summary: str, details: list[str]) -> Paren
 
 
 def build_parent_child_from_markdown(document: str, text: str) -> ParentChildDocument:
-    """Build parent/child chunks from a Markdown knowledge document.
+    """将单个 Markdown 文档解析为一个 Parent 和多个 Child。
 
-    The first H1 title is used as the parent when there is no introduction
-    before the first H2. Otherwise, the introduction before the first H2 is
-    the parent. Every H2 section becomes one child and retains its heading.
+    约定：
+    - 第一个 H1（#）是文档标题。
+    - 第一个 H2（##）之前的正文是 Parent 内容。
+    - 如果 H1 后没有介绍正文，则使用 H1 标题作为 Parent 内容。
+    - 每个 H2 区块生成一个 Child，并保留 H2 标题。
+    - H3 及更深层级标题属于当前 Child，不单独拆分。
     """
     normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized:
         raise ValueError("parent-child markdown document cannot be empty")
 
-    sections = list(re.finditer(r"(?m)^##(?!#)\\s+.+?\\s*$", normalized))
-    if not sections:
-        title_match = re.search(r"(?m)^#(?!#)\\s+(.+?)\\s*$", normalized)
-        parent_text = title_match.group(1).strip() if title_match else normalized
+    h1_match = re.search(r"(?m)^#(?!#)\s+(.+?)\s*$", normalized)
+    h2_matches = list(re.finditer(r"(?m)^##(?!#)\s+.+?\s*$", normalized))
+
+    if not h2_matches:
+        parent_text = h1_match.group(1).strip() if h1_match else normalized
         return build_parent_child(document, parent_text, [])
 
-    first_h2 = sections[0]
+    first_h2 = h2_matches[0]
     introduction = normalized[: first_h2.start()].strip()
-    title_match = re.search(r"(?m)^#(?!#)\\s+(.+?)\\s*$", introduction)
 
-    if title_match:
-        introduction_without_title = (introduction[: title_match.start()] + introduction[title_match.end() :]).strip()
+    if h1_match and h1_match.start() < first_h2.start():
+        introduction_without_title = (
+            introduction[: h1_match.start()]
+            + introduction[h1_match.end() :]
+        ).strip()
     else:
         introduction_without_title = introduction
 
-    parent_text = introduction_without_title or (title_match.group(1).strip() if title_match else "")
+    parent_text = introduction_without_title or (h1_match.group(1).strip() if h1_match else "")
     if not parent_text:
         raise ValueError("parent-child markdown document must contain a title or introduction")
 
     children: list[str] = []
-    for index, section in enumerate(sections):
-        end = sections[index + 1].start() if index + 1 < len(sections) else len(normalized)
+    for index, section in enumerate(h2_matches):
+        end = h2_matches[index + 1].start() if index + 1 < len(h2_matches) else len(normalized)
         content = normalized[section.start() : end].strip()
         if content:
             children.append(content)
