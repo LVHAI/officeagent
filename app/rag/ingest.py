@@ -28,7 +28,7 @@ def _chunks_for_document(
         parsed = build_parent_child_from_markdown(name, document.content)
         return [parsed.parent, *parsed.children]
     if document.doc_type == "semantic":
-        return semantic_nodes(name and document.content or document.content, name, embedder=semantic_embedder)
+        return semantic_nodes(document.content, name, embedder=semantic_embedder)
     if document.doc_type == "faq":
         # FAQ 暂时沿用语义切分，保持 ingestion 可用；后续可替换为独立 FAQ parser。
         return semantic_nodes(document.content, name, embedder=semantic_embedder)
@@ -57,7 +57,8 @@ async def ingest_corpus(
     all_chunks: list[DocumentChunk] = []
     for document in documents:
         logger.info("rag.ingest.parse document=%s strategy=%s", document.path, document.doc_type)
-        chunks = _chunks_for_document(document)
+        semantic_embedder = embedding_service.embed_documents_sync if document.doc_type in {"semantic", "faq"} else None
+        chunks = _chunks_for_document(document, semantic_embedder=semantic_embedder)
         all_chunks.extend(chunks)
         logger.info("rag.ingest.parsed document=%s chunks=%d", document.path, len(chunks))
 
