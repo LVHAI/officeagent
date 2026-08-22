@@ -25,17 +25,16 @@ def test_agent_factories_use_the_declared_runtime(monkeypatch, factory, expected
 
     result = factory()
 
-    assert result is (deep if expected == "deep" else standard)
-    if expected == "deep":
-        deep.assert_called_once()
-    else:
-        standard.assert_called_once()
+    expected_factory = deep if expected == "deep" else standard
+    assert result is expected_factory.return_value
+    expected_factory.assert_called_once()
 
 
 def test_supervisor_declares_specialist_subagents(monkeypatch):
     deep = MagicMock()
     monkeypatch.setattr(deepagents, "create_deep_agent", deep)
     monkeypatch.setattr(deepagents, "build_chat_model", MagicMock())
+    monkeypatch.setattr(deepagents, "build_tavily_search", MagicMock(return_value=MagicMock()))
 
     deepagents.create_supervisor()
 
