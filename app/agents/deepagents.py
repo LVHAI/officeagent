@@ -139,6 +139,23 @@ def _report_json_prompt(context: str) -> str:
     )
 
 
+def _recommendation_to_text(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        description = item.get("description") or item.get("recommendation") or item.get("action")
+        actions = item.get("action_items")
+        if isinstance(actions, list) and actions:
+            action_text = "; ".join(str(action) for action in actions)
+            if description:
+                return f"{description} ({action_text})"
+            return action_text
+        if description:
+            return str(description)
+        return json.dumps(item, ensure_ascii=False)
+    return str(item)
+
+
 def _coerce_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize common Qwen/report-template variants into the internal schema."""
     if "summary" not in payload and payload.get("executive_summary") is not None:
@@ -146,9 +163,14 @@ def _coerce_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     recommendations = payload.get("recommendations", [])
     if isinstance(recommendations, str):
-        payload["recommendations"] = [recommendations]
+        recommendations = [recommendations]
     elif recommendations is None:
-        payload["recommendations"] = []
+        recommendations = []
+    elif isinstance(recommendations, list):
+        recommendations = [_recommendation_to_text(item) for item in recommendations]
+    else:
+        recommendations = [_recommendation_to_text(recommendations)]
+    payload["recommendations"] = recommendations
 
     findings = payload.get("findings")
     if findings is None:
@@ -169,11 +191,26 @@ def _coerce_report_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 elif value is not None:
                     findings.append({"title": str(key), "evidence": str(value), "confidence": 1.0})
         payload["findings"] = findings
+    elif isinstance(findings, list):
+        normalized_findings = []
+        for item in findings:
+            if isinstance(item, dict):
+                normalized_findings.append(item)
+            elif item is not None:
+                normalized_findings.append({"title": "Finding", "evidence": str(item), "confidence": 1.0})
+        payload["findings"] = normalized_findings
 
     if payload.get("sources") is None:
         payload["sources"] = []
     if payload.get("partial_results") is None:
         payload["partial_results"] = []
+
+    for key in ("delegations", "errors"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            partial_results = list(payload.get("partial_results") or [])
+            partial_results.extend(json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else str(item) for item in value)
+            payload["partial_results"] = partial_results
 
     return payload
 
