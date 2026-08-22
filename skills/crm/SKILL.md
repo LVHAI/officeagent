@@ -1,8 +1,9 @@
 # CRM Customer Analysis
 
 Use the **Database MCP Server** to inspect CRM customer data stored in PostgreSQL.
-The CRM dataset contains customer profiles and purchase history in the `customers`
-and `customer_orders` tables.
+This is a **domain-specific CRM skill**. When a request is clearly about customers,
+customer value, purchase history, or churn, this skill takes precedence over the
+generic SQL skill.
 
 ## Responsibilities
 
@@ -24,13 +25,23 @@ Use this skill when the user asks about:
 - Database access: **Database MCP Server**
 - SQL tool: `sql_query`
 
+## Skill priority
+
+- Treat this skill as the domain-specific workflow for CRM requests.
+- Prefer this skill over the generic `Database SQL` skill when the request is about CRM customers.
+- The generic SQL skill provides database-querying guidance; it must not replace the CRM workflow for a clearly CRM-specific request.
+- CRM data access is centralized through the Database MCP `sql_query` tool.
+- Do not call a separate CRM/customer tool when the required CRM information can be obtained from PostgreSQL through `sql_query`, unless the system explicitly requires that tool.
+
 ## Tool policy
 
 - Discover Database MCP tools before invocation.
 - Use the `sql_query` tool for PostgreSQL reads; do not fabricate CRM data.
+- Discover or verify the database schema before constructing unfamiliar CRM queries.
 - Only execute read-only `SELECT` / `WITH` queries.
 - Prefer bounded queries with `customer_id`, `region`, date ranges, `LIMIT`, or other selective filters.
 - Never modify schema or data through the CRM skill.
+- Never invent table names or column names. Use the schema below or discovered schema metadata.
 - Preserve source metadata from the Database MCP result, including the database,
   tool name, SQL used, and returned columns when available.
 - If the requested information is not present in PostgreSQL, state that it is
