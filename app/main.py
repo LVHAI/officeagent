@@ -4,15 +4,22 @@ from fastapi import FastAPI
 
 from app.api.analysis import initialize_task_store
 from app.api.analysis import router as analysis_router
+from app.core.checkpoint import close_checkpointer, initialize_checkpointer
 from app.core.config import settings
 from app.core.health import dependency_status
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Persistent task storage must be initialized before the first request.
+    # Persistent infrastructure must be initialized before the first request.
     initialize_task_store()
-    yield
+    if settings.environment != "test":
+        await initialize_checkpointer()
+    try:
+        yield
+    finally:
+        if settings.environment != "test":
+            await close_checkpointer()
 
 
 app = FastAPI(title="OfficeAgent", version="0.1.0", lifespan=lifespan)
