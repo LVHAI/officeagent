@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.contracts import DelegationTrace
 from app.agents.deepagents import create_report_agent, create_supervisor
+from app.agents.mcp_registry import mcp_registry
 from app.core.checkpoint import get_checkpointer
 from app.core.config import settings
 from app.core.execution import run_with_timeout
@@ -60,12 +61,27 @@ def _delegation(task_id: str, child: str, status: str, elapsed_ms: float = 0.0, 
     ).__dict__
 
 
+def _supervisor_tools() -> dict[str, list[Any]]:
+    return {
+        "knowledge": mcp_registry.tools("knowledge"),
+        "tool": mcp_registry.tools("crm", "database", "report"),
+    }
+
+
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
-    """Supervisor DeepAgent 自主规划并通过 task/subagents 完成 Delegation。"""
     task_id = state["task_id"]
     started = asyncio.get_running_loop().time()
     try:
-        result, trace = await _invoke(create_supervisor(), state["query"], "supervisor", task_id)
+        tools = _supervisor_tools()
+        result, trace = await _invoke(
+            create_supervisor(
+                knowledge_tools=tools["knowledge"],
+                tool_tools=tools["tool"],
+            ),
+            state["query"],
+            "supervisor",
+            task_id,
+        )
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
         delegations = [
             _delegation(task_id, name, "completed", elapsed_ms=elapsed)
@@ -117,7 +133,6 @@ async def report_node(state: AgentState) -> dict[str, Any]:
 
 
 def build_workflow():
-    """LangGraph 负责外层 State/Checkpoint；测试环境仍使用 InMemorySaver。"""
     graph = StateGraph(AgentState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("report", report_node)
