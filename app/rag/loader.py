@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from docx import Document as DocxDocument
+from pypdf import PdfReader
+
 
 SUPPORTED_CHUNKING_STRATEGIES = frozenset({"policy", "faq", "parent_child", "semantic"})
-SUPPORTED_SOURCE_SUFFIXES = frozenset({".txt", ".md"})
+SUPPORTED_SOURCE_SUFFIXES = frozenset({".txt", ".md", ".pdf", ".docx"})
 
 
 @dataclass(frozen=True)
@@ -16,12 +19,41 @@ class LoadedDocument:
 
 
 class DocumentLoader:
+    """Load supported office documents and resolve their RAG chunking strategy."""
+
     def load(self, path: str | Path) -> str:
         file_path = Path(path)
         suffix = file_path.suffix.lower()
         if suffix not in SUPPORTED_SOURCE_SUFFIXES:
             raise ValueError(f"unsupported document type: {suffix}")
-        return file_path.read_text(encoding="utf-8")
+        if suffix in {".txt", ".md"}:
+            return file_path.read_text(encoding="utf-8")
+        if suffix == ".pdf":
+            return self._load_pdf(file_path)
+        if suffix == ".docx":
+            return self._load_docx(file_path)
+        raise ValueError(f"unsupported document type: {suffix}")
+
+    @staticmethod
+    def _load_pdf(path: Path) -> str:
+        reader = PdfReader(str(path))
+        pages = [(page.extract_text() or "").strip() for page in reader.pages]
+        return "\n\n".join(page for page in pages if page)
+
+    @staticmethod
+    def _load_docx(path: Path) -> str:
+        document = DocxDocument(str(path))
+        blocks: list[str] = []
+        for paragraph in document.paragraphs:
+            text = paragraph.text.strip()
+            if text:
+                blocks.append(text)
+        for table in document.tables:
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                if any(cells):
+                    blocks.append(" | ".join(cells))
+        return "\n".join(blocks)
 
     def resolve_type(self, path: str | Path, corpus_root: str | Path | None = None) -> str:
         """Resolve the intended chunking strategy from the corpus folder."""
