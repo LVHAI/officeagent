@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import operator
+import time
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
@@ -15,6 +17,8 @@ from app.core.checkpoint import get_checkpointer
 from app.core.config import settings
 from app.core.execution import run_with_timeout
 from app.core.trace import AgentTrace
+
+logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict, total=False):
@@ -34,18 +38,28 @@ GLOBAL_TIMEOUT_SECONDS = 120.0
 
 async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_id: str | None = None):
     trace = AgentTrace(task_id=task_id, agent_id=agent_id, parent_agent_id=parent_agent_id)
+    started = time.perf_counter()
+    logger.info("agent.invoke.start task_id=%s agent=%s parent=%s", task_id, agent_id, parent_agent_id or "-")
     try:
         result = await run_with_timeout(
             agent.ainvoke({"messages": [{"role": "user", "content": query}]}),
             timeout=AGENT_TIMEOUT_SECONDS,
         )
         trace.finish()
+        logger.info(
+            "agent.invoke.completed task_id=%s agent=%s elapsed_ms=%.1f",
+            task_id,
+            agent_id,
+            (time.perf_counter() - started) * 1000,
+        )
         return result, trace.to_dict()
     except asyncio.CancelledError:
         trace.finish(status="cancelled", error="agent task cancelled")
+        logger.warning("agent.invoke.cancelled task_id=%s agent=%s", task_id, agent_id)
         raise
     except Exception as exc:
         trace.finish(status="failed", error=str(exc))
+        logger.exception("agent.invoke.failed task_id=%s agent=%s elapsed_ms=%.1f", task_id, agent_id, (time.perf_counter() - started) * 1000)
         raise
 
 
@@ -71,8 +85,15 @@ def _supervisor_tools() -> dict[str, list[Any]]:
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
     task_id = state["task_id"]
     started = asyncio.get_running_loop().time()
+    logger.info("workflow.supervisor.start task_id=%s", task_id)
     try:
         tools = _supervisor_tools()
+        logger.info(
+            "workflow.supervisor.tools task_id=%s knowledge=%d enterprise=%d",
+            task_id,
+            len(tools["knowledge"]),
+            len(tools["tool"]),
+        )
         result, trace = await _invoke(
             create_supervisor(
                 knowledge_tools=tools["knowledge"],
@@ -88,10 +109,13 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
             for name in ("knowledge-agent", "tool-agent", "web-agent")
             if name.replace("-agent", "") in str(result).lower()
         ]
+        logger.info("workflow.supervisor.completed task_id=%s elapsed_ms=%.1f delegations=%d", task_id, elapsed, len(delegations))
         return {"supervisor_result": result, "traces": [trace], "delegations": delegations}
     except asyncio.CancelledError:
+        logger.warning("workflow.supervisor.cancelled task_id=%s", task_id)
         raise
     except Exception as exc:
+        logger.exception("workflow.supervisor.failed task_id=%s elapsed_ms=%.1f", task_id, (asyncio.get_running_loop().time() - started) * 1000)
         return {
             "status": "partial",
             "errors": [f"supervisor: {exc}"],
@@ -109,14 +133,19 @@ async def report_node(state: AgentState) -> dict[str, Any]:
         "errors": state.get("errors", []),
         "delegations": state.get("delegations", []),
     }
+    started = time.perf_counter()
+    logger.info("workflow.report.start task_id=%s", task_id)
     try:
         result, trace = await _invoke(
             create_report_agent(), str(context), "report", task_id, parent_agent_id="supervisor"
         )
+        logger.info("workflow.report.completed task_id=%s elapsed_ms=%.1f", task_id, (time.perf_counter() - started) * 1000)
         return {"report": result, "status": "completed", "traces": [trace]}
     except asyncio.CancelledError:
+        logger.warning("workflow.report.cancelled task_id=%s", task_id)
         raise
     except Exception as exc:
+        logger.exception("workflow.report.failed task_id=%s elapsed_ms=%.1f", task_id, (time.perf_counter() - started) * 1000)
         return {
             "status": "partial",
             "errors": [f"report: {exc}"],
@@ -133,6 +162,8 @@ async def report_node(state: AgentState) -> dict[str, Any]:
 
 
 def build_workflow():
+    logger.info("workflow.build.start environment=%s", settings.environment)
+    started = time.perf_counter()
     graph = StateGraph(AgentState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("report", report_node)
@@ -140,7 +171,9 @@ def build_workflow():
     graph.add_edge("supervisor", "report")
     graph.add_edge("report", END)
     checkpointer = InMemorySaver() if settings.environment == "test" else get_checkpointer()
-    return graph.compile(checkpointer=checkpointer)
+    workflow = graph.compile(checkpointer=checkpointer)
+    logger.info("workflow.build.completed elapsed_ms=%.1f checkpointer=%s", (time.perf_counter() - started) * 1000, type(checkpointer).__name__)
+    return workflow
 
 
 def new_task_state(query: str) -> AgentState:
