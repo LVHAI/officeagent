@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.agents.mcp_registry import mcp_registry
 from app.api.analysis import initialize_task_store
 from app.api.analysis import router as analysis_router
 from app.core.checkpoint import close_checkpointer, initialize_checkpointer
@@ -11,14 +12,15 @@ from app.core.health import dependency_status
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Persistent infrastructure must be initialized before the first request.
     initialize_task_store()
     if settings.environment != "test":
         await initialize_checkpointer()
+        await mcp_registry.initialize()
     try:
         yield
     finally:
         if settings.environment != "test":
+            await mcp_registry.close()
             await close_checkpointer()
 
 
@@ -35,4 +37,5 @@ def health() -> dict:
         "dependencies": {
             item.name: {"ok": item.ok, "detail": item.detail} for item in dependencies
         },
+        "mcp": {"discovered": {name: len(mcp_registry.tools(name)) for name in ("crm", "database", "knowledge", "report")}, "errors": mcp_registry.errors},
     }
