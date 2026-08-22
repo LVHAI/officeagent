@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import logging
+import sys
 import time
 from uuid import uuid4
 
@@ -12,21 +13,44 @@ from app.core.checkpoint import close_checkpointer, initialize_checkpointer
 from app.core.config import settings
 from app.core.health import dependency_status
 
-logging.getLogger().setLevel(logging.INFO)
-logging.getLogger("app").setLevel(logging.INFO)
-logger = logging.getLogger(__name__)
+
+# Uvicorn normally configures logging, but explicitly attach a console handler to
+# the application logger so diagnostics are visible when the app is started in
+# other ways (python, IDE, tests, etc.).
+logger = logging.getLogger("app")
+logger.setLevel(logging.INFO)
+logger.propagate = True
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+    logger.addHandler(handler)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    logger.info("application.startup environment=%s", settings.environment)
+    logger.info(
+        "application.startup environment=%s llm_provider=%s llm_model=%s llm_base_url=%s llm_api_key_configured=%s",
+        settings.environment,
+        settings.llm_provider,
+        settings.llm_model,
+        settings.llm_base_url or "default",
+        bool(settings.llm_api_key),
+    )
     initialize_task_store()
     logger.info("application.task_store.initialized")
     if settings.environment != "test":
         await initialize_checkpointer()
         logger.info("application.checkpointer.initialized")
         await mcp_registry.initialize()
-        logger.info("application.mcp.initialized errors=%d", len(mcp_registry.errors))
+        logger.info(
+            "application.mcp.initialized errors=%d discovered=crm:%d,database:%d,knowledge:%d,report:%d",
+            len(mcp_registry.errors),
+            len(mcp_registry.tools("crm")),
+            len(mcp_registry.tools("database")),
+            len(mcp_registry.tools("knowledge")),
+            len(mcp_registry.tools("report")),
+        )
     try:
         yield
     finally:
