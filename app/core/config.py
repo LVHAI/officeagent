@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_base_url: str | None = None
     llm_model: str = "gpt-4o-mini"
+    llm_timeout_seconds: float = 30.0
     embedding_model: str = "text-embedding-3-small"
     tavily_api_key: str | None = None
 
