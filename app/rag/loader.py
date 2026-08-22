@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 
 SUPPORTED_CHUNKING_STRATEGIES = frozenset({"policy", "faq", "parent_child", "semantic"})
+SUPPORTED_SOURCE_SUFFIXES = frozenset({".txt", ".md"})
+
+
+@dataclass(frozen=True)
+class LoadedDocument:
+    path: Path
+    content: str
+    doc_type: str
 
 
 class DocumentLoader:
     def load(self, path: str | Path) -> str:
         file_path = Path(path)
         suffix = file_path.suffix.lower()
-        if suffix not in {".txt", ".md"}:
+        if suffix not in SUPPORTED_SOURCE_SUFFIXES:
             raise ValueError(f"unsupported document type: {suffix}")
         return file_path.read_text(encoding="utf-8")
 
@@ -33,6 +42,25 @@ class DocumentLoader:
                     )
                 return strategy
         return DocumentTypeClassifier().classify(file_path.name, self.load(file_path))
+
+    def load_corpus(self, corpus_root: str | Path) -> list[LoadedDocument]:
+        """Read all supported documents and resolve their explicit/fallback strategy."""
+        root = Path(corpus_root).resolve()
+        if not root.is_dir():
+            raise ValueError(f"RAG corpus directory does not exist: {root}")
+        documents: list[LoadedDocument] = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in SUPPORTED_SOURCE_SUFFIXES:
+                continue
+            content = self.load(path)
+            documents.append(
+                LoadedDocument(
+                    path=path,
+                    content=content,
+                    doc_type=self.resolve_type(path, root),
+                )
+            )
+        return documents
 
 
 class DocumentTypeClassifier:
