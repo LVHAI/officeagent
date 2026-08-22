@@ -18,6 +18,21 @@ class MilvusRepository:
     def ensure_collection(self, dimension: int) -> None:
         if self.client.has_collection(self.collection):
             return
+        self._create_collection(dimension)
+
+    def reset_collection(self, dimension: int) -> None:
+        """清空本次 Corpus 对应的 collection 后重新建立 schema/index。
+
+        每次执行 data 全量入库都调用此方法，确保 Milvus 不残留上一次运行的数据。
+        采用 drop + recreate 而不是逐条 delete，同时能够处理 Embedding 维度变化。
+        """
+        if self.client.has_collection(self.collection):
+            self.client.drop_collection(self.collection)
+        self._create_collection(dimension)
+
+    def _create_collection(self, dimension: int) -> None:
+        if dimension <= 0:
+            raise ValueError("Milvus vector dimension must be positive")
         schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
         schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=128)
         schema.add_field("vector", DataType.FLOAT_VECTOR, dim=dimension)
@@ -56,7 +71,6 @@ class MilvusRepository:
             "output_fields": ["content", "id"],
         }
         if metadata_filter:
-            # Milvus expression 使用字符串字面量；值经过转义后避免破坏表达式。
             expressions = [
                 f'{key} == "{str(value).replace(chr(92), chr(92) + chr(92)).replace(chr(34), chr(92) + chr(34))}"'
                 for key, value in metadata_filter.items()
