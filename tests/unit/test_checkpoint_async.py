@@ -2,9 +2,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import app.core.checkpoint as checkpoint
 from app.agents.graph import build_workflow
 from app.core.config import settings
-import app.core.checkpoint as checkpoint
 
 
 @pytest.mark.asyncio
