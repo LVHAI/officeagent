@@ -1,6 +1,8 @@
 from pathlib import Path
 
 import pytest
+from docx import Document
+from pypdf import PdfReader, PdfWriter
 
 from app.rag.loader import DocumentLoader
 
@@ -61,3 +63,49 @@ def test_load_corpus_reads_all_strategy_folders(tmp_path: Path) -> None:
         "parent_child",
         "semantic",
     }
+
+
+def test_load_pdf_document(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "semantic" / "example.pdf"
+    pdf_path.parent.mkdir(parents=True)
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
+
+    assert DocumentLoader().load(pdf_path) == ""
+
+
+def test_load_docx_document(tmp_path: Path) -> None:
+    docx_path = tmp_path / "parent_child" / "example.docx"
+    docx_path.parent.mkdir(parents=True)
+    document = Document()
+    document.add_paragraph("企业知识库测试内容")
+    document.save(docx_path)
+
+    assert DocumentLoader().load(docx_path) == "企业知识库测试内容"
+
+
+def test_load_corpus_reads_pdf_and_docx_with_folder_strategy(tmp_path: Path) -> None:
+    corpus = tmp_path / "rag"
+
+    pdf_path = corpus / "policy" / "policy.pdf"
+    pdf_path.parent.mkdir(parents=True)
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
+
+    docx_path = corpus / "parent_child" / "parent.docx"
+    docx_path.parent.mkdir(parents=True)
+    document = Document()
+    document.add_paragraph("父子文档测试内容")
+    document.save(docx_path)
+
+    documents = DocumentLoader().load_corpus(corpus)
+
+    assert {(document.path.suffix, document.doc_type) for document in documents} == {
+        (".pdf", "policy"),
+        (".docx", "parent_child"),
+    }
+    assert next(document for document in documents if document.path.suffix == ".docx").content == "父子文档测试内容"
