@@ -60,7 +60,7 @@ class MCPClient:
         except Exception as exc:  # noqa: BLE001 - 边界层统一归一化第三方异常
             if isinstance(exc, MCPError):
                 raise
-            raise MCPError(f"MCP tool discovery failed: {exc}") from exc
+            raise MCPError(f"MCP tool discovery failed: {_exception_detail(exc)}") from exc
 
     async def call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         async def operation():
@@ -75,7 +75,17 @@ class MCPClient:
         except Exception as exc:  # noqa: BLE001 - 边界层统一归一化第三方异常
             if isinstance(exc, MCPError):
                 raise
-            raise MCPError(f"MCP tool invocation failed: {tool_name}: {exc}") from exc
+            raise MCPError(
+                f"MCP tool invocation failed: {tool_name}: {_exception_detail(exc)}"
+            ) from exc
+
+
+def _exception_detail(exc: BaseException) -> str:
+    """Flatten ExceptionGroup/TaskGroup errors so the real transport failure is visible."""
+    if isinstance(exc, BaseExceptionGroup):
+        details = [_exception_detail(child) for child in exc.exceptions]
+        return "; ".join(detail for detail in details if detail) or str(exc)
+    return f"{type(exc).__name__}: {exc}"
 
 
 class MCPError(RuntimeError):
