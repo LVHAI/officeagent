@@ -1,5 +1,7 @@
+import logging
 import os
 import re
+import time
 from typing import Any
 
 import psycopg
@@ -12,6 +14,8 @@ DB_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
 DB_NAME = os.getenv("POSTGRES_DB", "officeagent")
 DB_USER = os.getenv("POSTGRES_USER", "officeagent")
 DB_PASSWORD = os.getenv("POSTGRES_PASSWORD", "officeagent")
+
+logger = logging.getLogger("app.sql")
 
 # FastMCP 1.11 configures the HTTP bind address/port on the server settings,
 # while FastMCP.run() only accepts transport/mount_path. Configure the
@@ -55,17 +59,74 @@ def _database_connection() -> psycopg.Connection[Any]:
     )
 
 
+def _log_sql_start(service: str, tool: str, sql: str, params: list[Any] | None = None) -> float:
+    """Log the SQL before execution and return a monotonic start timestamp."""
+    started = time.monotonic()
+    logger.info(
+        "sql.execute.start service=%s tool=%s sql=%s params=%r",
+        service,
+        tool,
+        sql,
+        params,
+    )
+    return started
+
+
+def _log_sql_completed(
+    service: str,
+    tool: str,
+    sql: str,
+    started: float,
+    row_count: int,
+    params: list[Any] | None = None,
+) -> None:
+    logger.info(
+        "sql.execute.completed service=%s tool=%s elapsed_ms=%.2f row_count=%d sql=%s params=%r",
+        service,
+        tool,
+        (time.monotonic() - started) * 1000,
+        row_count,
+        sql,
+        params,
+    )
+
+
+def _log_sql_failed(
+    service: str,
+    tool: str,
+    sql: str,
+    started: float,
+    error: Exception,
+    params: list[Any] | None = None,
+) -> None:
+    logger.exception(
+        "sql.execute.failed service=%s tool=%s elapsed_ms=%.2f sql=%s params=%r error=%s",
+        service,
+        tool,
+        (time.monotonic() - started) * 1000,
+        sql,
+        params,
+        error,
+    )
+
+
 async def _sql_query(sql: str, limit: int = 100) -> dict[str, Any]:
     statement = validate_read_only_sql(sql)
     limit = max(1, min(limit, 500))
+    started = _log_sql_start("database", "sql_query", statement)
 
-    with _database_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute("SET TRANSACTION READ ONLY")
-            cursor.execute(statement)
-            columns = [description.name for description in cursor.description or []]
-            rows = cursor.fetchmany(limit)
+    try:
+        with _database_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SET TRANSACTION READ ONLY")
+                cursor.execute(statement)
+                columns = [description.name for description in cursor.description or []]
+                rows = cursor.fetchmany(limit)
+    except Exception as error:
+        _log_sql_failed("database", "sql_query", statement, started, error)
+        raise
 
+    _log_sql_completed("database", "sql_query", statement, started, len(rows))
     return {
         "system": "PostgreSQL",
         "database": DB_NAME,
@@ -110,12 +171,19 @@ def build_service_tools(service_name: str, server: FastMCP | None = None) -> lis
                 ORDER BY total_spent DESC
                 LIMIT 100
             """
-            with _database_connection() as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute("SET TRANSACTION READ ONLY")
-                    cursor.execute(sql, params)
-                    columns = [description.name for description in cursor.description or []]
-                    rows = cursor.fetchall()
+            started = _log_sql_start("crm", "customer_query", sql, params)
+            try:
+                with _database_connection() as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SET TRANSACTION READ ONLY")
+                        cursor.execute(sql, params)
+                        columns = [description.name for description in cursor.description or []]
+                        rows = cursor.fetchall()
+            except Exception as error:
+                _log_sql_failed("crm", "customer_query", sql, started, error, params)
+                raise
+
+            _log_sql_completed("crm", "customer_query", sql, started, len(rows), params)
             return {
                 "system": "CRM",
                 "database": DB_NAME,
