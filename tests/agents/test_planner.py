@@ -1,11 +1,18 @@
 import json
 
-from app.agents.planner import create_execution_planner, extract_execution_plan
+from app.agents.planner import PLAN_TOOL, create_execution_planner, extract_execution_plan
 
 
 def test_create_execution_planner_is_importable():
     planner = create_execution_planner()
     assert planner is not None
+
+
+def test_planner_tool_exposes_explicit_function_schema():
+    schema = PLAN_TOOL.args_schema.model_json_schema()
+    task = schema["$defs"]["ExecutionTaskInput"]
+    assert "parallel_group" in task["properties"]
+    assert "null" in str(task["properties"]["parallel_group"])
 
 
 def test_extract_execution_plan_from_structured_tool_call():
@@ -29,6 +36,41 @@ def test_extract_execution_plan_from_structured_tool_call():
     }
     plan = extract_execution_plan(result)
     assert plan.tasks[0].agent == "knowledge-agent"
+
+
+def test_extract_execution_plan_accepts_model_nullable_defaults():
+    result = {
+        "messages": [
+            {
+                "type": "ai",
+                "tool_calls": [
+                    {
+                        "name": "submit_execution_plan",
+                        "args": {
+                            "tasks": [
+                                {
+                                    "task_id": "k",
+                                    "agent": "knowledge-agent",
+                                    "query": "查制度",
+                                    "depends_on": None,
+                                    "parallel_group": None,
+                                    "constraints": None,
+                                }
+                            ],
+                            "rationale": None,
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+
+    plan = extract_execution_plan(result)
+
+    assert plan.tasks[0].parallel_group == "default"
+    assert plan.tasks[0].depends_on == []
+    assert plan.tasks[0].constraints == {}
+    assert plan.rationale == ""
 
 
 def test_extract_execution_plan_from_executed_tool_message():
