@@ -8,7 +8,7 @@ type User = { user_id: string; email: string };
 type Session = { session_id: string; user_id: string; created_at: string; updated_at: string };
 type Message = { message_id: string; role: string; content: string; metadata?: Record<string, unknown> };
 
-aasync function request(path: string, init: RequestInit = {}) {
+async function request(path: string, init: RequestInit = {}) {
   const response = await fetch(`${API}${path}`, { ...init, credentials: "include", headers: { "Content-Type": "application/json", ...(init.headers || {}) } });
   if (!response.ok) throw new Error((await response.json().catch(() => null))?.detail || `HTTP ${response.status}`);
   return response.json();
@@ -47,9 +47,7 @@ export default function Home() {
     event.preventDefault(); setError(""); setBusy(true);
     try {
       await request(`/auth/${registering ? "register" : "login"}`, { method: "POST", body: JSON.stringify({ email, password }) });
-      if (registering) {
-        await request("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
-      }
+      if (registering) await request("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
       setPassword(""); await loadUser();
     } catch (err) { setError(err instanceof Error ? err.message : "Authentication failed"); }
     finally { setBusy(false); }
