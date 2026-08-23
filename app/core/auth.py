@@ -55,7 +55,7 @@ def create_user(email: str, password: str) -> dict:
         raise ValueError("invalid email")
     password_hash = hash_password(password)
     now = datetime.now(timezone.utc)
-    user_id = str(secrets.token_hex(16))
+    user_id = secrets.token_hex(16)
     with psycopg.connect(_dsn()) as conn:
         try:
             conn.execute("INSERT INTO users(user_id, email, password_hash, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)", (user_id, email, password_hash, now, now))
@@ -103,7 +103,7 @@ def delete_session(token: str | None) -> None:
         conn.commit()
 
 
-def current_user(token: str | None = None) -> dict:
+def current_user(token: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
     user = get_user_by_token(token)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
