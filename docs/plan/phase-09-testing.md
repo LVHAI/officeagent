@@ -13,6 +13,12 @@
 - Retry
 - Timeout
 - Error normalization
+- Context Compression structured reduction
+- Context Compression safe truncation fallback
+- Context Compression optional LLM summary
+- Citation extraction / normalization
+- Citation deduplication
+- Citation preservation after compression
 
 ### Integration Test
 
@@ -22,6 +28,8 @@
 - LangGraph → Web
 - Aggregation → Replan
 - Checkpoint → Resume
+- Knowledge → Aggregation → Report Citation
+- Parent-Child Retrieval → Parent Context → Report Citation
 
 ### Concurrency Test
 
@@ -41,3 +49,11 @@
 8. Partial Result
 9. Replan
 10. Checkpoint Resume
+11. RAG Policy Citation
+12. RAG Parent-Child Citation
+13. Knowledge 大结果 Context Compression
+14. Tool 大结果 Context Compression
+15. Web 大结果 Context Compression
+16. Compression Failure Fallback
+17. Citation 在 Compression 后仍然完整
+18. Long Context 不得无限传递给 Supervisor / Report Agent
