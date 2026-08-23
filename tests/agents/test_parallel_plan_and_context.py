@@ -79,4 +79,33 @@ def test_aggregated_context_does_not_forward_message_history_to_report():
     assert "messages" not in report_result
     assert "traces" not in context["successful_results"][0]
     assert "最终客户分析证据" in report_result["final_evidence"]
-    assert len(serialized) < 9000
+    assert len(serialized) < 4000
+
+
+def test_three_specialist_results_stay_small_for_report_context():
+    outputs = []
+    for agent_id in ("tool-agent", "web-agent", "knowledge-agent"):
+        outputs.append(
+            {
+                "agent_id": agent_id,
+                "status": "completed",
+                "result": {
+                    "messages": [
+                        {"role": "tool", "content": "x" * 12000},
+                        {"role": "assistant", "content": f"{agent_id} final evidence"},
+                    ],
+                    "debug": {"large": "y" * 12000},
+                },
+                "sources": [],
+                "errors": [],
+                "traces": [{"agent_id": agent_id, "elapsed_ms": 10000}],
+            }
+        )
+
+    context = aggregate_agent_outputs(outputs)
+    serialized = json.dumps(context, ensure_ascii=False)
+
+    assert len(context["successful_results"]) == 3
+    assert all("messages" not in item["result"] for item in context["successful_results"])
+    assert all("traces" not in item for item in context["successful_results"])
+    assert len(serialized) < 10000
