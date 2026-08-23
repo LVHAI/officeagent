@@ -20,10 +20,19 @@ def test_mcp_tool_result_contract():
 
 @pytest.mark.asyncio
 async def test_mcp_discovery_normalizes_timeout(monkeypatch):
-    async def timeout(*args, **kwargs):
-        raise TimeoutError("boom")
+    class TimeoutContext:
+        async def __aenter__(self):
+            raise TimeoutError("boom")
 
-    monkeypatch.setattr("app.mcp.client.asyncio.timeout", timeout)
+        async def __aexit__(self, *args):
+            return False
+
+    # asyncio.timeout() is a synchronous factory returning an async context
+    # manager. Patch that contract rather than replacing it with a coroutine.
+    monkeypatch.setattr(
+        "app.mcp.client.asyncio.timeout",
+        lambda *args, **kwargs: TimeoutContext(),
+    )
     client = MCPClient("crm", "http://crm", timeout=0.01)
     with pytest.raises(MCPError, match="discovery timed out"):
         await client.list_tools()
