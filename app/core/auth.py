@@ -9,7 +9,6 @@ import psycopg
 from fastapi import Cookie, HTTPException, status
 
 from app.core.config import settings
-from app.core.db_migrations import apply_migrations
 
 SESSION_COOKIE = "officeagent_session"
 SESSION_TTL = timedelta(days=7)
@@ -38,10 +37,6 @@ def verify_password(password: str, encoded: str) -> bool:
 
 def _dsn() -> str:
     return settings.postgres_dsn
-
-
-def setup_auth_store() -> None:
-    apply_migrations()
 
 
 def create_user(email: str, password: str) -> dict:
