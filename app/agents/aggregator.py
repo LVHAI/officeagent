@@ -48,11 +48,11 @@ def _message_content(message: Any) -> str | None:
 
 
 def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS) -> Any:
-    """Remove agent execution envelopes before sending results to the Report Agent.
+    """Remove agent execution envelopes before the result enters shared workflow context.
 
-    Full AgentOutput remains in workflow state for tracing/audit. The Report Agent only
-    needs the final evidence-bearing content, not LangGraph message history, tool-call
-    envelopes, or intermediate execution metadata.
+    Full AgentOutput remains in ``agent_outputs`` for tracing/audit. Aggregated context
+    is deliberately evidence-focused so Report Agent and replan prompts do not receive
+    LangGraph message history, tool-call envelopes, or intermediate execution metadata.
     """
     if isinstance(result, dict):
         messages = result.get("messages")
@@ -79,6 +79,20 @@ def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS)
         return _truncate_text(result, limit)
 
     return result
+
+
+def _compact_output(output: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the Agent Contract fields required by downstream synthesis."""
+    return {
+        "agent_id": output.get("agent_id"),
+        "status": output.get("status"),
+        "result": compact_result_for_report(output.get("result")),
+        "sources": [
+            source.__dict__ if isinstance(source, Source) else source
+            for source in output.get("sources", [])
+        ],
+        "errors": output.get("errors", []),
+    }
 
 
 def extract_sources(result: Any) -> list[Source]:
@@ -147,7 +161,7 @@ def extract_sources(result: Any) -> list[Source]:
 
 
 def aggregate_agent_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build deterministic, citation-aware context for the Report Agent."""
+    """Build deterministic, citation-aware and token-bounded synthesis context."""
     successful: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     partial: list[dict[str, Any]] = []
@@ -156,12 +170,13 @@ def aggregate_agent_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
 
     for output in outputs:
         status = str(output.get("status", "unknown"))
+        compact = _compact_output(output)
         if status == "completed":
-            successful.append(output)
+            successful.append(compact)
         else:
-            failed.append(output)
+            failed.append(compact)
             if output.get("result") is not None:
-                partial.append(output)
+                partial.append(compact)
         for source in [*output.get("sources", []), *extract_sources(output.get("result"))]:
             key = _source_key(source)
             if key not in seen:
@@ -175,35 +190,3 @@ def aggregate_agent_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
         "sources": [source.__dict__ for source in sources],
         "has_partial_result": bool(failed),
     }
-
-
-def build_report_context(context: dict[str, Any]) -> dict[str, Any]:
-    """Create the small, evidence-focused context consumed by Report Agent.
-
-    Execution traces, delegation records and raw message histories stay in LangGraph
-    state for auditability but are deliberately excluded from the LLM prompt.
-    """
-    report_context: dict[str, Any] = {
-        "sources": context.get("sources", []),
-        "has_partial_result": bool(context.get("has_partial_result")),
-        "successful_results": [],
-        "partial_results": [],
-        "failed_results": [],
-    }
-
-    for bucket in ("successful_results", "partial_results", "failed_results"):
-        for output in context.get(bucket, []):
-            report_context[bucket].append(
-                {
-                    "agent_id": output.get("agent_id"),
-                    "status": output.get("status"),
-                    "result": compact_result_for_report(output.get("result")),
-                    "sources": [
-                        source.__dict__ if isinstance(source, Source) else source
-                        for source in output.get("sources", [])
-                    ],
-                    "errors": output.get("errors", []),
-                }
-            )
-
-    return report_context
