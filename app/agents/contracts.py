@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
@@ -30,6 +30,9 @@ class AgentOutput:
     errors: list[str] = field(default_factory=list)
     traces: list[dict[str, Any]] = field(default_factory=list)
     elapsed_ms: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
