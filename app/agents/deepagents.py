@@ -162,3 +162,96 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
 
 def create_knowledge_agent(tools=None):
     return create_agent(model=build_chat_model(), tools=tools or [], system_prompt=KNOWLEDGE_PROMPT)
+
+
+class _ReportAgent:
+    """Adapter exposing the same ainvoke contract used by graph._invoke."""
+
+    def __init__(self, model: Any):
+        self._model = model
+        self._tool_model = model.bind_tools(
+            [submit_analysis_report],
+            tool_choice="submit_analysis_report",
+        )
+
+    @staticmethod
+    def _extract_report(response: Any) -> AnalysisReport:
+        tool_calls = getattr(response, "tool_calls", None) or []
+        if not tool_calls:
+            raise ValueError("Report Agent did not call submit_analysis_report")
+        if len(tool_calls) != 1:
+            raise ValueError(
+                f"Report Agent must call submit_analysis_report exactly once; got {len(tool_calls)}"
+            )
+
+        call = tool_calls[0]
+        name = call.get("name")
+        if name != "submit_analysis_report":
+            raise ValueError(f"Unexpected Report Agent tool call: {name!r}")
+
+        args = call.get("args")
+        if not isinstance(args, dict):
+            raise ValueError("submit_analysis_report tool arguments must be an object")
+
+        try:
+            return AnalysisReport.model_validate(args)
+        except Exception as exc:
+            logger.exception(
+                "report.validation.failed tool=submit_analysis_report error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+            )
+            raise
+
+    async def ainvoke(self, request: dict[str, Any]) -> AnalysisReport:
+        task_id = str(request.get("task_id", "unknown"))
+        messages = request.get("messages", [])
+        context = messages[-1].get("content", "") if messages else ""
+        logger.info(
+            "report.invoke.start task_id=%s model=%s context_length=%d tool=submit_analysis_report",
+            task_id,
+            settings.llm_model,
+            len(str(context)),
+        )
+
+        started = time.perf_counter()
+        try:
+            response = await ainvoke_chat_model(
+                self._tool_model,
+                f"{REPORT_PROMPT}\n\nValidated context:\n{context}",
+                agent_id="report",
+                task_id=task_id,
+            )
+            tool_calls = getattr(response, "tool_calls", None) or []
+            logger.info(
+                "report.tool_call.received task_id=%s call_count=%d names=%s",
+                task_id,
+                len(tool_calls),
+                [call.get("name") for call in tool_calls],
+            )
+            report = self._extract_report(response)
+        except Exception as exc:
+            logger.exception(
+                "report.invoke.failed task_id=%s elapsed_ms=%.1f error_type=%s error=%s",
+                task_id,
+                (time.perf_counter() - started) * 1000,
+                type(exc).__name__,
+                exc,
+            )
+            raise
+
+        logger.info(
+            "report.invoke.completed task_id=%s elapsed_ms=%.1f findings=%d recommendations=%d sources=%d partial_results=%d",
+            task_id,
+            (time.perf_counter() - started) * 1000,
+            len(report.findings),
+            len(report.recommendations),
+            len(report.sources),
+            len(report.partial_results),
+        )
+        return report
+
+
+def create_report_agent():
+    logger.info("agent.create report model=%s tool=submit_analysis_report", settings.llm_model)
+    return _ReportAgent(build_chat_model())
