@@ -2,71 +2,50 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from app.agents.graph import new_task_state, supervisor_node
+from app.agents.graph import aggregate_node, replan_node
+
+
+def _plan_result():
+    return {
+        "messages": [
+            {
+                "type": "ai",
+                "tool_calls": [
+                    {
+                        "name": "submit_execution_plan",
+                        "args": {
+                            "tasks": [
+                                {"task_id": "retry-web", "agent": "web-agent", "query": "重新搜索最新市场数据"}
+                            ]
+                        },
+                        "id": "plan-2",
+                    }
+                ],
+            }
+        ]
+    }
 
 
 @pytest.mark.asyncio
-async def test_delegation_without_tool_result_remains_delegated_not_completed():
-    agent = Mock()
-    agent.ainvoke = AsyncMock(
-        return_value={
-            "messages": [
-                {
-                    "type": "ai",
-                    "tool_calls": [
-                        {
-                            "name": "task",
-                            "args": {"subagent_type": "web-agent", "description": "搜索最新市场数据"},
-                            "id": "call-web",
-                        }
-                    ],
-                }
-            ]
-        }
-    )
+async def test_failed_agent_output_triggers_one_replan():
+    state = {
+        "task_id": "task-1",
+        "query": "查询最新市场数据",
+        "replan_count": 0,
+        "agent_outputs": [
+            {"agent_id": "web-agent", "status": "failed", "result": None, "errors": ["timeout"]}
+        ],
+        "errors": ["web-agent: timeout"],
+        "traces": [],
+        "delegations": [],
+    }
+    aggregated = await aggregate_node(state)
+    state.update(aggregated)
 
-    with patch("app.agents.graph.create_supervisor", return_value=agent):
-        result = await supervisor_node(new_task_state("搜索最新市场数据"))
+    planner = Mock()
+    planner.ainvoke = AsyncMock(return_value=_plan_result())
+    with patch("app.agents.graph.create_execution_planner", return_value=planner):
+        result = await replan_node(state)
 
-    assert result["delegations"][0]["status"] == "delegated"
-    assert result["delegations"][0]["child_agent_id"] == "web-agent"
-    assert result["agent_outputs"][0]["agent_id"] == "supervisor"
-
-
-@pytest.mark.asyncio
-async def test_failed_delegation_is_redelegated_once_and_failure_is_preserved():
-    supervisor = Mock()
-    supervisor.ainvoke = AsyncMock(
-        return_value={
-            "messages": [
-                {
-                    "type": "ai",
-                    "tool_calls": [
-                        {
-                            "name": "task",
-                            "args": {"subagent_type": "tool-agent", "description": "查询 CRM"},
-                            "id": "call-tool",
-                        }
-                    ],
-                },
-                {
-                    "type": "tool",
-                    "tool_call_id": "call-tool",
-                    "content": "error: database unavailable",
-                },
-            ]
-        }
-    )
-    retry_agent = Mock()
-    retry_agent.ainvoke = AsyncMock(side_effect=RuntimeError("database still unavailable"))
-
-    with patch("app.agents.graph.create_supervisor", return_value=supervisor), patch(
-        "app.agents.graph.create_tool_agent", return_value=retry_agent
-    ):
-        result = await supervisor_node(new_task_state("查询 CRM"))
-
-    assert result["delegations"][0]["status"] == "failed"
-    assert result["delegations"][0]["error"]
-    assert result["delegations"][1]["status"] == "failed"
-    assert result["delegations"][1]["delegation_id"].startswith("retry-")
-    assert result["agent_outputs"][-1]["status"] == "failed"
+    assert result["replan_count"] == 1
+    assert result["execution_plan"]["tasks"][0]["agent"] == "web-agent"
