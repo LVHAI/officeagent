@@ -11,7 +11,7 @@ from app.rag.retriever import HybridRetriever
 
 
 class RetrievalPipeline:
-    """RAG 检索编排层：查询改写 + BM25 + Milvus + 重排 + 引用。"""
+    """RAG 检索编排层：查询改写 + BM25 + Milvus + 重排 + Parent Context + 引用。"""
 
     def __init__(self, chunks: Sequence[DocumentChunk], *, embeddings: EmbeddingService | None = None, vector_store: MilvusRepository | None = None, reranker: Reranker | None = None, query_rewriter: QueryRewriter | None = None) -> None:
         self.retriever = HybridRetriever(chunks)
@@ -19,9 +19,26 @@ class RetrievalPipeline:
         self.vector_store = vector_store
         self.reranker = reranker or Reranker()
         self.query_rewriter = query_rewriter or QueryRewriter()
+        self.chunks = list(chunks)
+
+    @staticmethod
+    def expand_parent_context(results: Sequence[RetrievalResult], chunks: Sequence[DocumentChunk]) -> list[RetrievalResult]:
+        """Restore parent summaries for child hits without replacing the matched child."""
+        by_id = {chunk.id: chunk for chunk in chunks}
+        expanded = list(results)
+        seen = {result.chunk.id for result in expanded}
+        for result in results:
+            parent_id = result.chunk.metadata.get("parent_id")
+            if not parent_id or parent_id in seen:
+                continue
+            parent = by_id.get(str(parent_id))
+            if parent is None:
+                continue
+            expanded.append(RetrievalResult(parent, result.score * 0.99, "parent"))
+            seen.add(parent.id)
+        return expanded
 
     async def retrieve_async(self, query: str, *, limit: int = 5, metadata_filter: dict[str, str] | None = None) -> list[RetrievalResult]:
-        # 先统一查询格式，再进入多路检索，避免同一个请求不同路由使用不同 Query。
         rewritten_query = self.query_rewriter.rewrite(query)
         lexical = self.retriever.bm25(rewritten_query, limit=max(limit * 10, 20), metadata_filter=metadata_filter)
         routes: list[Sequence[RetrievalResult]] = [lexical]
@@ -30,21 +47,20 @@ class RetrievalPipeline:
                 vector = await self.embeddings.embed_query(rewritten_query)
                 routes.append(self.vector_store.search(vector, limit=max(limit * 10, 20), metadata_filter=metadata_filter))
             except Exception:
-                # 向量服务短暂不可用时降级到 BM25，保证基础检索能力仍可用。
                 pass
         merged = self.retriever.merge_and_rerank(routes, limit=max(limit * 2, 10))
-        return self.reranker.rerank(rewritten_query, merged, limit=limit)
+        reranked = self.reranker.rerank(rewritten_query, merged, limit=limit)
+        return self.expand_parent_context(reranked, self.chunks)
 
     def retrieve(self, query: str, *, limit: int = 5, metadata_filter: dict[str, str] | None = None) -> list[RetrievalResult]:
-        # 保留同步 BM25 接口，方便单元测试和纯本地开发场景使用。
         rewritten_query = self.query_rewriter.rewrite(query)
         lexical = self.retriever.bm25(rewritten_query, limit=max(limit * 10, 20), metadata_filter=metadata_filter)
         merged = self.retriever.merge_and_rerank([lexical], limit=max(limit * 2, 10))
-        return self.reranker.rerank(rewritten_query, merged, limit=limit)
+        reranked = self.reranker.rerank(rewritten_query, merged, limit=limit)
+        return self.expand_parent_context(reranked, self.chunks)
 
     @staticmethod
     def build_context(results: Sequence[RetrievalResult]) -> str:
-        """构造带引用标记的上下文，避免生成答案时丢失文档来源。"""
         blocks: list[str] = []
         for index, result in enumerate(results, start=1):
             source = result.chunk.source or Source(chunk_id=result.chunk.id)
