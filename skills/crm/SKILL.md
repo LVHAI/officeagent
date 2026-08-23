@@ -1,6 +1,9 @@
 ---
 name: crm
 description: CRM customer analysis and PostgreSQL access through the Database MCP sql_query tool.
+mcp_server: database
+mcp_tools:
+  - sql_query
 ---
 
 # CRM Customer Analysis
