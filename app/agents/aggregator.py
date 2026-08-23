@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.agents.context_compression import compress_context
 from app.agents.contracts import Source
 
 # Report context is deliberately much smaller than the raw AgentOutput. The full
@@ -53,27 +54,8 @@ def _message_content(message: Any) -> str | None:
 
 def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS) -> Any:
     """Keep concise final evidence and never forward raw agent message history."""
-    if isinstance(result, dict):
-        messages = result.get("messages")
-        if isinstance(messages, list):
-            # Agent/tool traces can contain many large intermediate messages. The
-            # downstream Report Agent needs the final evidence, not the full loop.
-            contents = [_message_content(message) for message in messages]
-            contents = [content for content in contents if content]
-            final_evidence = contents[-1] if contents else ""
-            return {"final_evidence": _truncate_text(final_evidence, limit)}
-
-        encoded = json.dumps(result, ensure_ascii=False, default=str)
-        return _truncate_text(encoded, limit)
-
-    if isinstance(result, (list, tuple)):
-        encoded = json.dumps(result, ensure_ascii=False, default=str)
-        return _truncate_text(encoded, limit)
-
-    if isinstance(result, str):
-        return _truncate_text(result, limit)
-
-    return result
+    compressed = compress_context(result, max_chars=limit)
+    return compressed.value
 
 
 def _compact_source(source: Any) -> dict[str, Any]:
@@ -109,6 +91,26 @@ def _compact_output(output: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _knowledge_source(raw: dict[str, Any]) -> Source:
+    metadata = {
+        "document_id": raw.get("document_id"),
+        "page": raw.get("page"),
+        "section": raw.get("section"),
+        "article": raw.get("article"),
+        "chunk_id": raw.get("chunk_id"),
+        "parent_id": raw.get("parent_id"),
+        "chunk_type": raw.get("chunk_type"),
+        "score": raw.get("score"),
+        "route": raw.get("route"),
+    }
+    return Source(
+        kind="knowledge",
+        title=str(raw.get("document") or ""),
+        uri=str(raw.get("uri") or ""),
+        metadata={key: value for key, value in metadata.items() if value is not None},
+    )
+
+
 def extract_sources(result: Any) -> list[Source]:
     """Extract normalized sources from AgentOutput results without inventing metadata."""
     found: list[Source] = []
@@ -120,21 +122,8 @@ def extract_sources(result: Any) -> list[Source]:
                 for raw in raw_sources:
                     if not isinstance(raw, dict):
                         continue
-                    if "document" in raw:
-                        found.append(
-                            Source(
-                                kind="knowledge",
-                                title=str(raw.get("document") or ""),
-                                metadata={
-                                    "page": raw.get("page"),
-                                    "section": raw.get("section"),
-                                    "article": raw.get("article"),
-                                    "chunk_id": raw.get("chunk_id"),
-                                    "score": raw.get("score"),
-                                    "route": raw.get("route"),
-                                },
-                            )
-                        )
+                    if "document" in raw and not (raw.get("url") or raw.get("href")):
+                        found.append(_knowledge_source(raw))
                     elif raw.get("url") or raw.get("href"):
                         found.append(
                             Source(
