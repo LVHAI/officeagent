@@ -79,6 +79,31 @@ async def _get(task_id: str) -> TaskRecord | None:
     return await to_thread(_task_store.get, task_id)
 
 
+def _compact_agent_output(output: dict) -> dict:
+    """Expose final evidence only; never return raw LangChain message history."""
+    result = output.get("result")
+    if isinstance(result, dict) and isinstance(result.get("messages"), list):
+        messages = result["messages"]
+        final_content = ""
+        for message in reversed(messages):
+            if isinstance(message, dict):
+                content = message.get("content")
+            else:
+                content = getattr(message, "content", None)
+            if isinstance(content, str) and content.strip():
+                final_content = content
+                break
+        result = {"final_evidence": final_content}
+    return {
+        "agent_id": output.get("agent_id"),
+        "status": output.get("status"),
+        "result": result,
+        "sources": output.get("sources", []),
+        "errors": output.get("errors", []),
+        "elapsed_ms": output.get("elapsed_ms", 0.0),
+    }
+
+
 async def _set_redis_status(task_id: str, status: str) -> None:
     """Redis is coordination/cache only; persistence remains PostgreSQL."""
     try:
@@ -131,6 +156,10 @@ async def run_analysis(query: str) -> dict:
             len(result.get("traces", [])),
             len(result.get("agent_outputs", [])),
         )
+        response_agent_outputs = [
+            _compact_agent_output(output)
+            for output in result.get("agent_outputs", [])
+        ]
         response = {
             "task_id": task_id,
             "query": query,
@@ -139,7 +168,7 @@ async def run_analysis(query: str) -> dict:
             "errors": result.get("errors", []),
             "traces": result.get("traces", []),
             "delegations": result.get("delegations", []),
-            "agent_outputs": result.get("agent_outputs", []),
+            "agent_outputs": response_agent_outputs,
         }
         await _save(
             TaskRecord(
