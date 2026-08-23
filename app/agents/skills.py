@@ -18,10 +18,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Skill:
-    """Skill 元数据；只描述能力边界，不把 MCP Schema 注入 Agent Context。"""
+    """Skill metadata plus the complete instructions from SKILL.md."""
 
     name: str
     description: str
+    instructions: str = ""
     tool_names: tuple[str, ...] = ()
     mcp_server: str | None = None
     path: Path | None = None
@@ -70,7 +71,7 @@ class SkillRegistry:
 
 
 def load_skill_metadata(skills_root: Path) -> SkillRegistry:
-    """只加载轻量 metadata；完整 SKILL.md 由 Tool Agent 按需读取。"""
+    """Load Skill metadata and the complete SKILL.md body for runtime use."""
     registry = SkillRegistry()
     if not skills_root.exists():
         return registry
@@ -81,14 +82,24 @@ def load_skill_metadata(skills_root: Path) -> SkillRegistry:
         description = str(frontmatter.get("description") or "").strip()
         mcp_server = str(frontmatter.get("mcp_server") or "").strip() or None
         tool_names = tuple(_parse_list(frontmatter.get("mcp_tools", "")))
+        instructions = _read_skill_body(skill_file)
         registry.register(
             Skill(
                 name=name,
                 description=description,
+                instructions=instructions,
                 tool_names=tool_names,
                 mcp_server=mcp_server,
                 path=skill_file,
             )
+        )
+        logger.info(
+            "skill.load name=%s path=%s instructions_length=%d mcp_server=%s tools=%s",
+            name,
+            skill_file,
+            len(instructions),
+            mcp_server or "-",
+            list(tool_names),
         )
     return registry
 
@@ -123,6 +134,21 @@ def _read_frontmatter(path: Path) -> dict[str, str]:
     return result
 
 
+def _read_skill_body(path: Path) -> str:
+    """Read the complete Markdown body after YAML frontmatter."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "\n".join(lines).strip()
+
+    closing_index = next(
+        (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+        None,
+    )
+    if closing_index is None:
+        return "\n".join(lines).strip()
+    return "\n".join(lines[closing_index + 1 :]).strip()
+
+
 def _parse_list(value: str) -> list[str]:
     value = value.strip()
     if not value:
@@ -152,18 +178,19 @@ async def discover_skill_tools(
     registry: SkillRegistry,
     skill_name: str,
 ) -> list[MCPTool]:
-    """动态发现一个 Skill 对应的 MCP Schema，并执行 Skill 白名单过滤。"""
+    """Dynamically discover one Skill's MCP schema and apply its tool allowlist."""
     skill = registry.get(skill_name)
     if not skill.mcp_server:
         return []
     definitions = await client.discover_tools()
     selected = registry.select_tools(skill_name, definitions)
     logger.info(
-        "skill.mcp.discovery skill=%s server=%s discovered=%d selected=%d",
+        "skill.mcp.discovery skill=%s server=%s discovered=%d selected=%d instructions_length=%d",
         skill.name,
         skill.mcp_server,
         len(definitions),
         len(selected),
+        len(skill.instructions),
     )
     return selected
 
@@ -172,7 +199,7 @@ def build_skill_runtime_tools(
     registry: SkillRegistry,
     get_client: Callable[[str], MCPClient],
 ) -> list[StructuredTool]:
-    """Only expose Skill runtime operations; concrete MCP tools never enter Agent Context."""
+    """Expose Skill runtime operations; concrete MCP tools never enter Agent Context."""
 
     canonical_skills = registry.canonical_names()
     authorized_tools = registry.authorized_tool_names()
@@ -191,44 +218,60 @@ def build_skill_runtime_tools(
     # that agent/request lifecycle rather than shared globally between requests.
     discovered_tools: dict[str, dict[str, MCPTool]] = {}
 
-    async def discover_skill_mcp_tools(skill_name: str) -> list[dict[str, Any]]:
+    async def discover_skill_mcp_tools(skill_name: str) -> dict[str, Any]:
         skill = registry.get(skill_name)
         if not skill.mcp_server:
-            return []
+            logger.info(
+                "skill.mcp.discovery.no_server skill=%s instructions_length=%d",
+                skill.name,
+                len(skill.instructions),
+            )
+            return {
+                "skill_name": skill.name,
+                "instructions": skill.instructions,
+                "tools": [],
+            }
 
         cached = discovered_tools.get(skill_name)
         if cached is not None:
             logger.info(
-                "skill.mcp.discovery.cache_hit skill=%s server=%s selected=%d",
+                "skill.mcp.discovery.cache_hit skill=%s server=%s selected=%d instructions_length=%d",
                 skill.name,
                 skill.mcp_server,
                 len(cached),
+                len(skill.instructions),
             )
             definitions = list(cached.values())
         else:
             client = get_client(skill.mcp_server)
             logger.info(
-                "skill.mcp.discovery.start skill=%s server=%s",
+                "skill.mcp.discovery.start skill=%s server=%s instructions_length=%d",
                 skill.name,
                 skill.mcp_server,
+                len(skill.instructions),
             )
             definitions = await discover_skill_tools(client, registry, skill_name)
             discovered_tools[skill_name] = {definition.name: definition for definition in definitions}
             logger.info(
-                "skill.mcp.discovery.completed skill=%s server=%s selected=%d",
+                "skill.mcp.discovery.completed skill=%s server=%s selected=%d instructions_length=%d",
                 skill.name,
                 skill.mcp_server,
                 len(definitions),
+                len(skill.instructions),
             )
 
-        return [
-            {
-                "name": definition.name,
-                "description": definition.description,
-                "input_schema": definition.input_schema,
-            }
-            for definition in definitions
-        ]
+        return {
+            "skill_name": skill.name,
+            "instructions": skill.instructions,
+            "tools": [
+                {
+                    "name": definition.name,
+                    "description": definition.description,
+                    "input_schema": definition.input_schema,
+                }
+                for definition in definitions
+            ],
+        }
 
     async def invoke_skill_mcp_tool(
         skill_name: str,
@@ -256,13 +299,14 @@ def build_skill_runtime_tools(
         sql = arguments.get("sql") if isinstance(arguments, dict) else None
         started = time.perf_counter()
         logger.info(
-            "skill.mcp.invoke.start invocation_id=%s skill=%s server=%s tool=%s arguments=%s sql=%s",
+            "skill.mcp.invoke.start invocation_id=%s skill=%s server=%s tool=%s arguments=%s sql=%s instructions_length=%d",
             invocation_id,
             skill.name,
             skill.mcp_server,
             definition.name,
             arguments_text,
             sql if sql is not None else "-",
+            len(skill.instructions),
         )
         try:
             result = await client.call(definition.name, arguments)
@@ -296,10 +340,12 @@ def build_skill_runtime_tools(
             coroutine=discover_skill_mcp_tools,
             name="discover_skill_mcp_tools",
             description=(
-                "Discover MCP tool schemas only for the selected Skill. "
+                "Select a registered Skill and discover its authorized MCP tools. "
+                "This operation returns the COMPLETE SKILL.md instructions together with "
+                "the discovered MCP schemas. You MUST follow the returned Skill instructions "
+                "and schema when constructing the next MCP call. "
                 f"Canonical Skill names are: {available_skills}. "
-                "The Skill name must exactly match a registered Skill; do not invent aliases. "
-                "Select a Skill first and call this before MCP invocation."
+                "The Skill name must exactly match a registered Skill; do not invent aliases."
             ),
             args_schema=DiscoverArgs,
         ),
@@ -311,7 +357,8 @@ def build_skill_runtime_tools(
                 f"Canonical Skill names are: {available_skills}. "
                 f"Authorized MCP tool names are: {available_tools}. "
                 "The Skill name and tool name must exactly match registered values; do not invent names. "
-                "Call discover_skill_mcp_tools first and invoke only a discovered, Skill-authorized tool."
+                "Call discover_skill_mcp_tools first. The invocation must follow the selected Skill's "
+                "returned SKILL.md instructions and discovered schema."
             ),
             args_schema=InvokeArgs,
         ),
