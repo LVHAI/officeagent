@@ -15,14 +15,21 @@ async def execute_with_dependencies(
     *,
     max_parallel: int,
 ) -> list[tuple[dict, dict]]:
-    """Execute a plan respecting depends_on while preserving bounded concurrency.
+    """Execute a plan with bounded concurrency and explicit dependency context.
 
-    Tasks without dependencies form the first wave. A dependent task is released
-    only after every dependency completes successfully. If a dependency fails,
-    the dependent task is marked blocked instead of executing with incomplete
-    context. Independent branches continue running.
+    Hard dependencies block a task when a dependency fails. A task may opt into
+    ``constraints.dependency_mode=soft`` to receive successful and failed dependency
+    results as partial context instead of being blocked. Dependency results are
+    copied into the task constraints before execution so downstream agents can use
+    upstream evidence without hidden global state.
     """
+    if max_parallel <= 0:
+        raise ValueError("max_parallel must be positive")
+
     by_id = {task.task_id: task for task in tasks}
+    if len(by_id) != len(tasks):
+        raise ValueError("execution plan contains duplicate task_id")
+
     completed: dict[str, tuple[dict, dict]] = {}
     failed: set[str] = set()
     pending = set(by_id)
@@ -36,14 +43,35 @@ async def execute_with_dependencies(
         for task_id in pending:
             task = by_id[task_id]
             deps = set(task.depends_on)
-            if deps & failed:
+            mode = str(task.constraints.get("dependency_mode", "hard"))
+            failed_deps = deps & failed
+            if failed_deps and mode != "soft":
                 blocked.append(task)
-            elif deps <= completed.keys():
-                ready.append(task)
+            elif deps <= completed.keys() or (failed_deps and mode == "soft" and failed_deps <= failed):
+                dependency_results = {
+                    dep_id: {
+                        "status": results[dep_id][0].get("status"),
+                        "result": results[dep_id][0].get("result"),
+                        "errors": results[dep_id][0].get("errors", []),
+                    }
+                    for dep_id in deps
+                    if dep_id in results
+                }
+                ready.append(
+                    task.model_copy(
+                        update={
+                            "constraints": {
+                                **task.constraints,
+                                "dependency_results": dependency_results,
+                            }
+                        }
+                    )
+                )
 
         for task in blocked:
             pending.remove(task.task_id)
-            error = f"blocked by failed dependency: {sorted(set(task.depends_on) & failed)}"
+            failed_deps = sorted(set(task.depends_on) & failed)
+            error = f"blocked by failed dependency: {failed_deps}"
             output = {
                 "agent_id": task.agent,
                 "status": "failed",
@@ -70,8 +98,7 @@ async def execute_with_dependencies(
         if not ready:
             if pending:
                 unresolved = sorted(pending)
-                error = f"execution plan contains unresolved dependency cycle: {unresolved}"
-                raise ValueError(error)
+                raise ValueError(f"execution plan contains unresolved dependency cycle: {unresolved}")
             break
 
         async def run(task: ExecutionTask) -> tuple[str, tuple[dict, dict]]:
