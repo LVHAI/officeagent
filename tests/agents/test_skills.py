@@ -21,19 +21,21 @@ def test_unknown_skill_is_rejected():
         SkillRegistry([Skill("crm", "CRM operations")]).get("missing")
 
 
-def test_skill_alias_resolves_to_canonical_name():
+def test_skill_ids_are_exactly_the_registered_ids():
     registry = SkillRegistry([Skill("crm", "CRM operations")])
 
-    assert registry.get("crm") .name == "crm"
-    assert registry.get("crm_skill").name == "crm"
-    assert registry.get("crm_customer_info_skill").name == "crm"
+    assert registry.get("crm").name == "crm"
+
+    for invalid_name in ("crm_skill", "crm_customer_info_skill"):
+        with pytest.raises(KeyError, match="available skills"):
+            registry.get(invalid_name)
 
 
-def test_skill_alias_does_not_match_unrelated_skill():
-    registry = SkillRegistry([Skill("sql", "SQL operations")])
+def test_skill_registration_rejects_duplicate_names():
+    registry = SkillRegistry([Skill("crm", "CRM operations")])
 
-    with pytest.raises(KeyError):
-        registry.get("crm_customer_info_skill")
+    with pytest.raises(ValueError, match="Duplicate skill name"):
+        registry.register(Skill("crm", "Duplicate CRM"))
 
 
 def test_skill_metadata_contains_explicit_mcp_boundary():
