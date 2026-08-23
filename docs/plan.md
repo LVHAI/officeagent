@@ -7,7 +7,7 @@
 核心技术基线：
 
 - LangChain DeepAgents：Supervisor / Tool Agent Runtime
-- LangGraph：Workflow / State / Checkpoint / Persistence / 并行编排
+- LangGraph：Workflow / State / Checkpoint / Persistence / 并发编排
 - FastAPI：Backend API
 - Milvus：Vector Database
 - MCP：企业工具接入协议
@@ -15,401 +15,9 @@
 - Redis：缓存、会话及任务协调
 - Tavily：Web Agent 搜索工具
 
-### 关键架构原则
+## 2. 关键架构原则（必须严格执行）
 
-**LangGraph 是整个 Multi-Agent 系统的 Workflow / State / Persistence / 并行编排层；DeepAgents 是部分 Agent 的 Runtime，而不是所有 Agent 的统一创建方式。**
-
-系统使用 `create_deep_agent()` 创建核心 `SUPERVISOR_AGENT`。Supervisor 负责理解任务、规划任务，并决定调用一个或多个专业子 Agent。
-
-专业子 Agent 根据职责选择最合适的实现方式：
-
-- Knowledge Agent：普通 LangGraph Agent Node + RAG Pipeline，不强制使用 `create_deep_agent()`。
-- Tool Agent：使用 `create_deep_agent()`，负责 Skill / MCP Tool 的动态选择和复杂工具编排。
-- Web Agent：普通 Agent Node / ReAct Agent + Tavily Tool，不强制使用 `create_deep_agent()`。
-- Report Agent：Structured Output / 普通 Agent Node，负责最终报告生成，不强制使用 `create_deep_agent()`。
-
-目标架构：
-
-```text
-                         LangGraph
-                            │
-                            ▼
-                  ┌────────────────────┐
-                  │  SUPERVISOR_AGENT  │
-                  │ create_deep_agent  │
-                  └─────────┬──────────┘
-                            │
-                 Task Planning / Delegation
-                            │
-          ┌─────────────────┼─────────────────┐
-          │                 │                 │
-          ▼                 ▼                 ▼
-   Knowledge Agent      Tool Agent        Web Agent
-      RAG Node        create_deep_agent     Tavily
-          │                 │                 │
-     Milvus/BM25          MCP/Skill          Search
-          │                 │                 │
-          └─────────────────┼─────────────────┘
-                            ▼
-                     Result Aggregation
-                            │
-                            ▼
-                      Report Agent
-                            │
-                            ▼
-                  Final Answer + Sources
-```
-
-Supervisor 可以根据任务动态选择一个或多个子 Agent：
-
-```text
-简单知识问题
-  → Knowledge Agent
-
-企业数据查询
-  → Tool Agent
-
-最新外部信息
-  → Web Agent
-
-复杂企业分析
-  → Knowledge + Tool + Web 并行/串行组合
-```
-
-**不是所有任务都需要调用所有 Agent，也不是所有 Agent 都需要 DeepAgents。**
-
-### Supervisor Delegation 原则
-
-`SUPERVISOR_AGENT` 是真正的 Multi-Agent 决策中心，而不是简单的 LangGraph Router。
-
-Supervisor 必须能够：
-
-- 理解用户目标
-- 分解任务
-- 判断需要哪些专业 Agent
-- 委派一个或多个子 Agent
-- 根据子 Agent 返回结果继续委派
-- 判断是否可以并行执行
-- 处理 Partial Result
-- 在必要时重新 Delegation
-- 最终形成可交付的分析上下文
-
-LangGraph 不替代 Supervisor 的 Agentic Planning；LangGraph 负责执行 Supervisor 决策、维护 State、Checkpoint、并发和恢复。
-
-```text
-User
-  ↓
-LangGraph Workflow
-  ↓
-SUPERVISOR_AGENT (DeepAgent)
-  ↓
-Planning / Delegation
-  ├── Knowledge Agent
-  ├── Tool Agent (DeepAgent)
-  └── Web Agent (Tavily)
-  ↓
-Result Aggregation
-  ↓
-Report Agent
-  ↓
-Final Answer
-```
-
-### 运行原则
-
-**当前开发环境不运行在 Docker 中。**
-
-Backend、DeepAgents、LangGraph、RAG 等核心代码直接运行在 Mac 本机，便于 IDE Debug、Python Debugger、Agent Step-by-Step 调试和 LangGraph State 调试。
-
-Docker Compose 只负责启动当前项目依赖的外部基础设施和模拟企业系统，例如 PostgreSQL、Redis、Milvus、MinIO、MCP Server 等。
-
----
-
-# 2. Phase 0：Mac + Docker Infrastructure
-
-## 2.1 目标
-
-在 macOS 上通过 Docker Desktop 一键启动所有外部依赖，Backend 保持本机运行。
-
-目标开发拓扑：
-
-```text
-Mac
-│
-├── Backend（本机）
-│   ├── FastAPI
-│   ├── SUPERVISOR_AGENT / DeepAgents
-│   ├── LangGraph
-│   ├── RAG
-│   ├── Tool Agent / DeepAgents
-│   └── MCP Client
-│
-└── Docker Desktop
-    ├── PostgreSQL
-    ├── Redis
-    ├── Milvus
-    ├── etcd
-    ├── MinIO
-    ├── CRM MCP Server
-    ├── Database MCP Server
-    └── Mock Enterprise Services
-```
-
-## 2.2 Docker Compose
-
-创建：
-
-```text
-infra/docker-compose.yml
-```
-
-Docker Compose 仅管理外部服务，不包含当前 Backend 开发环境。
-
-服务包括：
-
-- PostgreSQL
-- Redis
-- Milvus
-- etcd
-- MinIO
-- CRM MCP Server
-- Database MCP Server
-- Knowledge MCP Server
-- Report MCP Server
-
-如部分 MCP Server 后续需要独立开发，也可以作为独立容器运行，Backend 通过 MCP Client 连接。
-
-## 2.3 macOS 兼容性
-
-必须验证：
-
-- Apple Silicon：M1 / M2 / M3 / M4
-- Intel Mac
-- Docker Desktop
-- `linux/arm64` 镜像优先
-- 必要时兼容 `linux/amd64`
-- 不依赖 NVIDIA CUDA
-- 不要求 Mac GPU Container Runtime
-
-LLM 默认通过 API Provider 调用；本地模型可选使用 Ollama，不将 CUDA / vLLM 作为 Mac 本地运行的强依赖。
-
-## 2.4 一键启动
-
-提供：
-
-```bash
-make infra-up
-```
-
-或：
-
-```bash
-./scripts/start-infra.sh
-```
-
-启动流程：
-
-```text
-检查 Docker Desktop
-        ↓
-检查环境变量
-        ↓
-docker compose up -d
-        ↓
-等待 PostgreSQL
-        ↓
-等待 Redis
-        ↓
-等待 Milvus
-        ↓
-等待 MCP Server
-        ↓
-执行 Health Check
-        ↓
-输出服务地址
-```
-
-同时提供：
-
-```bash
-make infra-down
-make infra-logs
-make infra-status
-```
-
-## 2.5 Service Health Check
-
-所有基础服务必须具有健康检查或可检测连接状态。
-
-启动脚本必须等待依赖真正 Ready 后再返回成功，不能仅依赖容器启动状态。
-
-重点检查：PostgreSQL、Redis、Milvus、MCP Server、MinIO。
-
-## 2.6 Docker 数据持久化
-
-使用 Docker volumes 保存 PostgreSQL、Milvus、MinIO 数据。
-
-默认 `docker compose down` 不删除数据。提供独立的 `make infra-reset` 明确删除本地开发数据，避免误删。
-
----
-
-# 3. Phase 1：Backend 本地开发环境
-
-Backend 不进入 Docker。
-
-本机安装并运行：
-
-- Python 3.12+
-- FastAPI
-- LangChain
-- DeepAgents
-- LangGraph
-- MCP SDK
-- RAG dependencies
-- Tavily integration
-
-提供：
-
-```bash
-make dev
-```
-
-启动本机 FastAPI，并支持 Hot Reload、IDE Debug、Python Debugger、Agent breakpoint 和 LangGraph state inspection。
-
-配置通过 `.env` 指向 Docker 服务：
-
-```text
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-REDIS_HOST=localhost
-REDIS_PORT=6379
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
-```
-
----
-
-# 4. Phase 2：Multi-Agent Runtime
-
-## 4.1 SUPERVISOR_AGENT
-
-使用 **LangChain DeepAgents `create_deep_agent()` 创建 `SUPERVISOR_AGENT`**。
-
-Supervisor 是整个 Multi-Agent 系统的核心 Agent Runtime，负责：
-
-- 理解用户任务
-- Task Planning
-- 判断需要哪些专业能力
-- Agent Delegation
-- 决定调用一个还是多个子 Agent
-- 决定执行顺序
-- 判断可并行任务
-- 处理子 Agent 返回结果
-- 必要时继续 Delegation
-- 处理 Partial Result
-- 汇总最终上下文
-
-Supervisor 不应把所有 MCP Tools、RAG Tools、Tavily Tools 直接注入自身 Context；专业能力通过子 Agent Delegation 暴露。
-
-## 4.2 Knowledge Agent
-
-Knowledge Agent 使用普通 LangGraph Agent Node / 明确的 Agent Runtime，不强制使用 `create_deep_agent()`。
-
-职责：
-
-- Query Rewrite
-- 企业知识库检索
-- BM25
-- Milvus
-- Reranker
-- Citation
-
-Knowledge Agent 的检索流程尽量保持确定性，避免为了使用 DeepAgents 而增加不必要的 Agentic Loop。
-
-## 4.3 Tool Agent
-
-Tool Agent 使用 `create_deep_agent()`。
-
-职责：
-
-- Skill Selection
-- Dynamic MCP Tool Discovery
-- Tool Schema Loading
-- MCP Tool Selection
-- MCP Tool Invocation
-- Tool Result Interpretation
-
-Tool Agent 只加载当前 Skill 所需 MCP Tools，不把所有企业工具一次性注入 Context。
-
-## 4.4 Web Agent
-
-Web Agent 使用 Tavily Tool。
-
-默认不使用 `create_deep_agent()`；如果未来 Web 搜索需要复杂多步规划，再单独评估是否引入 DeepAgents。
-
-职责：
-
-- Web Search
-- Search Result Filtering
-- Evidence Extraction
-- URL / Source Tracking
-
-## 4.5 Report Agent
-
-Report Agent 默认使用普通 Agent Node + Structured Output，不强制使用 `create_deep_agent()`。
-
-职责：
-
-- 聚合 Knowledge / Tool / Web 结果
-- 生成结构化分析报告
-- 保留 Source / Citation
-- 处理 Partial Result
-
-## 4.6 Agent Contract
-
-所有子 Agent 必须通过统一 State Contract 与 Supervisor 通信：
-
-```text
-AgentInput
-- task_id
-- parent_agent_id
-- query
-- context
-- constraints
-
-AgentOutput
-- agent_id
-- status
-- result
-- sources
-- errors
-- traces
-- elapsed_ms
-```
-
-禁止通过隐式全局变量共享 Agent 状态。
-
----
-
-# 5. Phase 3：LangGraph Workflow / State
-
-LangGraph 不替代 DeepAgents，而负责整个系统的 Workflow / State / Persistence / 并行编排。
-
-实现：
-
-- Workflow State
-- Supervisor ↔ Sub-Agent State
-- Agent execution state
-- Checkpoint
-- Persistence
-- Parallel execution
-- Conditional routing
-- Retry boundary
-- Timeout boundary
-- Human-in-the-loop
-- Failure recovery
-
-Supervisor 的 Agentic Delegation 与 LangGraph State 必须明确区分：
+本项目采用 **Supervisor DeepAgent 决策 + LangGraph 执行编排** 的架构。两者职责必须严格分离，禁止反向设计。
 
 ```text
 Supervisor DeepAgent
@@ -421,422 +29,578 @@ LangGraph
 执行 / 并发 / 持久化 / 恢复
 ```
 
-复杂任务允许 Knowledge / Tool / Web Agent 并行执行，避免无依赖任务串行等待。
+### 2.1 Supervisor DeepAgent 是决策中心
 
----
+使用 `create_deep_agent()` 创建 `SUPERVISOR_AGENT`。
 
-# 6. Phase 4：RAG + Milvus
+Supervisor 负责：
+
+- 理解用户目标
+- Task Planning
+- Task Decomposition
+- 判断需要调用哪些专业子 Agent
+- 决定调用一个、多个或不调用子 Agent
+- 决定子 Agent 的执行依赖关系
+- 判断哪些任务可以并行
+- 根据子 Agent 结果继续 Delegation / Replanning
+- 判断 Partial Result 是否可以继续
+- 形成最终分析上下文
+
+**Supervisor 不是简单 Router。** 不允许用固定规则把每个请求无条件分发给 Knowledge / Tool / Web Agent。
+
+**Supervisor 不直接注册全部 MCP Tools、RAG Tools、Tavily Tools。** 专业能力通过子 Agent 暴露，避免 Supervisor Context 随工具数量增长。
+
+### 2.2 LangGraph 是执行层
+
+LangGraph 不负责替代 Supervisor 的 Agentic Planning，而负责执行 Supervisor 已经做出的 Delegation 决策。
+
+LangGraph 负责：
+
+- Workflow State
+- Agent execution
+- Conditional routing
+- 并发执行
+- State merge / aggregation
+- Checkpoint
+- Persistence
+- Resume / Recovery
+- Retry boundary
+- Timeout / cancellation boundary
+- Failure isolation
+- Human-in-the-loop
+
+因此实现上必须保持：
+
+```text
+User Request
+     ↓
+Supervisor DeepAgent
+     ↓
+Delegation Plan
+     ↓
+LangGraph
+     ├── Knowledge Agent ──┐
+     ├── Tool Agent ──────┼── 并发执行（无依赖时）
+     └── Web Agent ───────┘
+     ↓
+Aggregation / Replan
+     ↓
+Report Agent
+     ↓
+Final Answer
+```
+
+### 2.3 子 Agent 是独立能力单元
+
+支持以下专业 Agent：
+
+- **Knowledge Agent**：知识库检索与 RAG。
+- **Tool Agent**：Skill → MCP 动态工具调用。
+- **Web Agent**：Tavily 外部搜索。
+- **Report Agent**：聚合结果并生成最终报告。
+
+Knowledge / Web / Report 不强制使用 DeepAgents；只有需要复杂 Agentic Tool Planning 的 Tool Agent 使用 `create_deep_agent()`。
+
+### 2.4 无依赖任务必须并发
+
+Supervisor 返回多个无依赖 Delegation 时，LangGraph 必须将其编排为并行执行，而不是串行调用。
+
+例如：
+
+```text
+Supervisor
+    ↓
+Delegation Plan
+    ├── Knowledge Agent ─────┐
+    ├── Tool Agent ──────────┼── asyncio / LangGraph parallel branches
+    └── Web Agent ───────────┘
+                              ↓
+                          Aggregation
+```
+
+只有存在明确依赖时才允许串行：
+
+```text
+Knowledge Agent
+      ↓
+Tool Agent（依赖 Knowledge 结果）
+      ↓
+Report Agent
+```
+
+### 2.5 失败必须隔离并支持恢复
+
+单个子 Agent 失败不能默认导致整个任务失败。
+
+必须支持：
+
+- Per-agent timeout
+- Per-agent retry
+- Failure isolation
+- Partial Result
+- Error normalization
+- State checkpoint
+- Workflow resume
+- Replanning
+
+例如：
+
+```text
+Knowledge ✓
+Tool      ✗ timeout
+Web       ✓
+   ↓
+Aggregation
+   ↓
+Supervisor 判断是否需要 Replan
+   ↓
+Report
+```
+
+### 2.6 Supervisor 与 LangGraph State 必须解耦
+
+Supervisor 的规划结果必须转换成明确的结构化 Delegation Plan，LangGraph 根据 Plan 执行。
+
+推荐 State：
+
+```text
+AgentState
+- task_id
+- query
+- plan
+- delegations
+- execution_status
+- agent_outputs
+- errors
+- traces
+- replan_count
+- final_context
+- final_answer
+```
+
+Delegation：
+
+```text
+Delegation
+- delegation_id
+- agent_id
+- task
+- dependencies
+- priority
+- timeout_seconds
+- status
+- result
+- error
+```
+
+禁止通过隐式全局变量共享 Agent 状态。
+
+## 3. Phase 0：基础设施
+
+Backend 不运行在 Docker 中。Docker Compose 只负责外部依赖和模拟企业服务。
+
+目标拓扑：
+
+```text
+Mac
+├── Backend
+│   ├── FastAPI
+│   ├── Supervisor DeepAgent
+│   ├── LangGraph
+│   ├── RAG
+│   └── MCP Client
+└── Docker Desktop
+    ├── PostgreSQL
+    ├── Redis
+    ├── Milvus
+    ├── etcd
+    ├── MinIO
+    └── MCP / Mock Enterprise Services
+```
+
+实现：
+
+- `infra/docker-compose.yml`
+- PostgreSQL
+- Redis
+- Milvus / etcd / MinIO
+- CRM / Database / Knowledge / Report MCP Server
+- Health Check
+- Docker volume 持久化
+- `make infra-up`
+- `make infra-down`
+- `make infra-status`
+- `make infra-logs`
+- `make infra-reset`
+
+验证 Apple Silicon / Intel Mac，不依赖 CUDA。
+
+## 4. Phase 1：Backend
+
+本机 Python 3.12+ 运行 FastAPI。
+
+实现：
+
+- 配置管理
+- `/api/v1/analyze`
+- Request / Response Schema
+- request_id / task_id
+- structured logging
+- error handling
+- timeout / cancellation
+- health check
+
+## 5. Phase 2：Supervisor DeepAgent
+
+### 5.1 创建方式
+
+必须使用：
+
+```python
+create_deep_agent(...)
+```
+
+创建 `SUPERVISOR_AGENT`。
+
+### 5.2 Supervisor 输出
+
+Supervisor 必须输出结构化 Delegation Plan，而不是直接执行所有工具。
+
+示例：
+
+```json
+{
+  "delegations": [
+    {
+      "agent_id": "knowledge",
+      "task": "查询企业制度中关于销售退款的规定",
+      "dependencies": []
+    },
+    {
+      "agent_id": "tool",
+      "task": "查询近三个月退款数据",
+      "dependencies": []
+    },
+    {
+      "agent_id": "web",
+      "task": "查询最新行业退款趋势",
+      "dependencies": []
+    }
+  ]
+}
+```
+
+Supervisor 不得直接执行这三个 Agent 的 MCP / RAG / Tavily 工具；计划产生后交给 LangGraph。
+
+### 5.3 动态 Delegation
+
+必须支持：
+
+```text
+简单知识问题 → Knowledge
+企业数据问题 → Tool
+最新外部信息 → Web
+复杂分析 → Knowledge + Tool + Web
+```
+
+具体选择必须由 Supervisor 根据任务决定，不能因为 Agent 已注册就全部执行。
+
+## 6. Phase 3：LangGraph Workflow
+
+建立唯一主 Workflow：
+
+```text
+START
+  ↓
+Supervisor DeepAgent
+  ↓
+Delegation Plan
+  ↓
+Parallel / Dependency Execution
+  ↓
+Aggregation
+  ↓
+需要补充？ ── Yes → Supervisor Replan
+  │                    ↓
+  │                 LangGraph
+  │
+  └── No
+       ↓
+Report Agent
+       ↓
+END
+```
+
+### 6.1 Graph Nodes
+
+至少包含：
+
+- `supervisor`
+- `execute_plan`
+- `aggregate`
+- `replan`
+- `report`
+
+### 6.2 并发
+
+无依赖 Delegation 使用 LangGraph 并行分支 / asyncio 执行。
+
+必须验证：
+
+- 3 个独立 Agent 是否真正并行
+- 一个 Agent 慢不会阻塞其他 Agent
+- State Merge 不发生覆盖
+- 同一个 task_id 下状态一致
+
+### 6.3 Checkpoint / Persistence
+
+LangGraph Checkpointer 必须支持：
+
+- task pause
+- process interruption
+- resume
+- failure recovery
+- state inspection
+
+测试环境允许 InMemory Checkpointer；生产/开发持久化使用 PostgreSQL 等持久化存储。
+
+### 6.4 Retry / Timeout
+
+每个 Agent Execution 必须拥有独立：
+
+- timeout
+- retry policy
+- cancellation handling
+- error boundary
+
+Retry 不得导致已经成功的其他 Agent 重复执行。
+
+## 7. Phase 4：Knowledge Agent / RAG
+
+Knowledge Agent 使用确定性的 RAG Pipeline，不为了使用 DeepAgents 而增加不必要的 Agent Loop。
 
 实现：
 
 - Document Parser
-- Document Type Classification
-- Policy Node Chunking
-- Parent-Child Retrieval
+- Markdown / semantic document parsing
+- Parent-Child Document
 - Semantic Chunking
 - Embedding
 - Milvus Schema
 - Vector Search
 - Metadata Filter
-- BM25 Search
+- BM25
 - Result Merge
 - Reranker
-- Context Builder
+- Top-K Context
 - Citation
 
-检索链路：
+流程：
 
 ```text
 Query
  ↓
 Query Rewrite
  ↓
-Vector Search + Metadata Filter + BM25
+Vector + BM25
  ↓
-Result Merge
+Merge
  ↓
 Reranker
  ↓
-Top-K Context
+Context Builder
  ↓
-Citation-aware Answer
+Citation Answer
 ```
 
-Knowledge Agent 负责调用该 Pipeline，不需要为了使用 RAG 而创建 DeepAgent。
+Knowledge Agent 由 LangGraph 调度，不能自行绕过 Supervisor 直接被所有请求无条件调用。
 
----
+## 8. Phase 5：Tool Agent / Skill / MCP
 
-# 7. Phase 5：MCP Tool Platform
+Tool Agent 使用 `create_deep_agent()`，但只暴露 Skill 层，不把全部企业 MCP Tool Schema 放入 Context。
 
-实现 MCP Client 和 Tool Discovery。
-
-支持：
-
-- CRM MCP Server
-- Database MCP Server
-- Knowledge MCP Server
-- Report MCP Server
-
-能力：
-
-- Tool Discovery
-- Dynamic Schema Loading
-- Tool Invocation
-- Timeout
-- Retry
-- Error Normalization
-- Tool Result Source Tracking
-
-MCP Tool 主要由 Tool Agent 使用。Supervisor 不直接依赖具体 MCP Tool 实现。
-
----
-
-# 8. Phase 6：Skill System
-
-实现：
-
-- Skill Registry
-- Skill Metadata
-- Skill Router
-- Dynamic Tool Loading
-- Skill-to-MCP mapping
-
-Skill System 必须遵循 **Skill → MCP** 的单向边界，Tool Agent 不直接持有企业 MCP Tool Registry 中的具体工具。
-
-Tool Agent 的执行流程必须固定为：
+严格执行：
 
 ```text
-用户任务
+Supervisor
   ↓
-Tool Agent 判断使用哪个 Skill
+Tool Agent
   ↓
-读取该 Skill 的 metadata
+Skill Selection
   ↓
-读取该 Skill 的完整 SKILL.md
+读取 Skill metadata / SKILL.md
   ↓
-Skill 声明允许使用的 MCP Server / MCP Tools
+Skill → MCP mapping
   ↓
 Dynamic MCP Tool Discovery
   ↓
-只加载该 Skill 声明的 MCP Tool Schema
+只加载当前 Skill 的 Tool Schema
   ↓
-Tool Agent 选择实际需要的 MCP Tool
+选择 MCP Tool
   ↓
-MCP Tool Invocation
+Invocation
   ↓
 Tool Result
 ```
 
-每个 `SKILL.md` 必须通过 frontmatter 声明自身的 MCP 边界，例如：
+要求：
+
+- Skill metadata 只用于选择。
+- 完整 `SKILL.md` 只在 Skill 被选择后加载。
+- MCP Schema 只动态加载当前 Skill 声明的工具。
+- Supervisor 不直接注册企业 MCP Tools。
+- Tool Agent 初始 Context 不包含 CRM / SQL / Report 等全部 Tool Schema。
+- MCP 数量增加时，Tool Agent Context 不随全部 MCP 数量线性增长。
+
+示例：
 
 ```yaml
 ---
 name: crm
-description: CRM customer analysis and PostgreSQL access through the Database MCP sql_query tool.
+description: CRM customer analysis
 mcp_server: database
 mcp_tools:
   - sql_query
 ---
 ```
 
-要求：
+## 9. Phase 6：Web Agent
 
-- Skill metadata 只用于 Skill Selection，不包含完整 MCP Tool Schema。
-- 完整 `SKILL.md` 只在 Skill 被选中后读取。
-- MCP Tool Schema 只在选中 Skill 后动态 Discovery。
-- 未被选中的 Skill，其 MCP Tool Schema 不得进入 Tool Agent Context。
-- Supervisor 不直接注册企业 MCP Tools，也不依赖具体 MCP Tool Schema。
-- Tool Agent 初始 Context 不包含 CRM、SQL、Report 等全部 MCP Tool Schema。
-- 一个 Skill 可以声明一个或多个 MCP Tools，但 Agent 只能选择当前 Skill 声明且 Discovery 到的工具。
-- MCP 数量增加时，Tool Agent Context 不应随着全部 MCP 数量线性增长。
-- Skill 是业务语义与 MCP 实现之间的隔离层，MCP Server / Tool 名称发生变化时优先修改 Skill mapping，而不是修改 Supervisor 路由逻辑。
+Web Agent 使用 Tavily。
 
-因此：
+职责：
 
-```text
-CRM 请求
-  → Tool Agent
-  → CRM Skill
-  → Discovery CRM Skill 声明的 MCP
-  → 选择最少必要 MCP Tool
+- Web Search
+- Result Filtering
+- Evidence Extraction
+- URL / Source Tracking
 
-通用 SQL 请求
-  → Tool Agent
-  → SQL Skill
-  → Discovery SQL Skill 声明的 MCP
-  → 选择最少必要 MCP Tool
-```
+Web Agent 不默认使用 DeepAgents。
 
-禁止实现为：
+只有 Supervisor 判断需要外部最新信息时才调用 Web Agent。
 
-```text
-Tool Agent
-  ↓
-一次性注册全部 MCP Tools
-  ↓
-让模型从全部 MCP Schema 中自行选择
-```
+## 10. Phase 7：Report Agent
 
-Supervisor 只需要知道 Tool Agent 的能力边界，不需要知道每一个 MCP Tool 的底层 Schema。
+Report Agent 负责：
 
----
+- Aggregation
+- Partial Result handling
+- Structured Output
+- Source / Citation preservation
+- Final Answer
 
-# 9. Phase 7：Source / Trace / Audit
+Report Agent 必须只消费 LangGraph Aggregation 后的结果，不直接绕过 Workflow 调用全部 Agent。
 
-所有 Agent 输出统一保留 Source。
+## 11. Phase 8：错误处理与可观测性
 
-知识库来源：
+统一记录：
 
-- document
-- page
-- section
-- article
-- chunk_id
-
-工具来源：
-
-- system
-- mcp_server
-- tool
 - request_id
-- execution_time
-
-Web 来源：
-
-- URL
-- title
-- source
-- retrieved_at
-
-Agent Trace：
-
 - task_id
 - agent_id
+- delegation_id
 - parent_agent_id
 - start_time
-- end_time
+- elapsed_ms
 - status
-- error
-- token usage
+- error_type
+- retry_count
+- checkpoint_id
 
-特别记录 Supervisor → Sub-Agent 的 Delegation Trace：
-
-```text
-Supervisor
-  ↓ delegate
-Knowledge Agent
-  ↓ result
-Supervisor
-  ↓ delegate
-Tool Agent
-```
-
-确保企业分析结果可以审计和追溯。
-
----
-
-# 10. Phase 8：并发与可靠性
-
-## 并发
-
-使用 async / await，并允许 Supervisor 委派的独立 Agent 并行执行。
-
-例如：
+日志必须能够回答：
 
 ```text
-Supervisor DeepAgent
-        ↓
-   Task Planning
-        ↓
- ┌───────────────┐
- │               │
-Knowledge     Tool        Web
- │               │           │
- └───────────────┴───────────┘
-                 ↓
-           Result Aggregator
+Supervisor 决定了什么？
+→ 调用了哪些 Agent？
+→ 哪些并行？
+→ 哪些成功/失败/超时？
+→ 是否 Replan？
+→ Checkpoint 在哪里？
+→ 最终用了哪些结果？
 ```
 
-要求：
+## 12. Phase 9：测试策略（TDD）
 
-- asyncio
-- LangGraph parallel nodes
-- Async MCP Client
-- bounded concurrency
-- per-task timeout
-- global timeout
-- cancellation propagation
+所有核心功能先写测试，再实现。
 
-## 错误处理
+### Unit Test
 
-统一异常：
-
-- AgentError
-- ToolError
-- RetrievalError
-- ModelError
-- MCPError
-- InfrastructureError
-
-机制：
-
-- Retry with exponential backoff
-- Timeout
-- Fallback
-- Circuit Breaker
-- Partial Result
-- Cancellation
-
-一个子 Agent 失败不能导致无依赖的其他 Agent 全部失败；Supervisor / Aggregator 必须能够处理 Partial Result，并决定是否需要重新 Delegation。
-
----
-
-# 11. Phase 9：测试
-
-## Unit Test
-
-测试：
-
-- Chunking
-- Embedding
-- Retrieval
-- Reranker
+- Supervisor Plan Schema
+- Delegation validation
+- Agent Contract
 - Skill Router
-- MCP Client
-- Tavily Web Agent Adapter
-- Error Handling
+- MCP Discovery
+- State Merge
+- Retry
+- Timeout
+- Error normalization
 
-## Agent Test
+### Integration Test
 
-测试：
+- Supervisor → LangGraph
+- LangGraph → Knowledge
+- LangGraph → Tool
+- LangGraph → Web
+- Aggregation → Replan
+- Checkpoint → Resume
 
-- Supervisor Planning
-- Supervisor Agent Delegation
-- Knowledge Agent
-- Tool Agent + DeepAgents
-- Web Agent + Tavily
-- Report Agent Structured Output
-- Agent State
-- Checkpoint Recovery
+### Concurrency Test
 
-## Integration Test
+验证三个独立 Agent 并行执行，而不是串行执行。
 
-使用 Docker 中的真实基础设施测试：
+### E2E Test
 
-- PostgreSQL
-- Redis
-- Milvus
-- MCP Servers
+至少覆盖：
 
-Backend 仍然由测试进程在本机运行。
+1. 仅 Knowledge
+2. 仅 Tool
+3. 仅 Web
+4. Knowledge + Tool 并行
+5. Knowledge + Tool + Web 并行
+6. 子 Agent 超时
+7. 子 Agent 失败
+8. Partial Result
+9. Replan
+10. Checkpoint Resume
 
-## Concurrency Test
+## 13. Phase 10：性能与 Context 控制
 
-测试：
+重点验证：
 
-- Supervisor 并行 Delegation
-- 多 Agent 并行
-- MCP 并发调用
-- 超时
-- Cancellation
-- Partial Failure
-- 高并发任务隔离
+- Supervisor Context 不包含全部 MCP Schema
+- Tool Agent Context 不包含未选择 Skill 的 Schema
+- 无依赖 Agent 不串行等待
+- Agent 结果只传递必要 Context
+- 大结果必须经过聚合 / 截断 / 摘要后再进入下一阶段
+- 日志记录每个 Agent 的耗时和 Context 长度
 
-## E2E Test
+目标是避免随着 Agent、Skill、MCP 数量增长导致 Context 爆炸和 Token 浪费。
 
-至少覆盖三类路径：
+## 14. 完成标准
 
-### 单 Agent
+只有同时满足以下条件才认为本计划完成：
+
+- Supervisor 使用 DeepAgent 进行真实 Task Planning / Delegation。
+- Supervisor 能动态决定调用哪些子 Agent，而不是全部调用。
+- LangGraph 负责实际执行 Supervisor Plan。
+- 无依赖子 Agent 能真正并发执行。
+- 有依赖任务能够按依赖顺序执行。
+- Checkpoint / Persistence / Resume 可用。
+- 单个 Agent 失败不会无条件拖垮整个 Workflow。
+- 支持 Partial Result 和 Replan。
+- Tool Agent 遵循 Skill → MCP 动态加载边界。
+- Knowledge / Web / Report 不被强制 DeepAgent 化。
+- 所有关键路径具有 Unit / Integration / Concurrency / E2E 测试。
+- 日志可以完整追踪 Supervisor 决策、LangGraph 执行和恢复过程。
+
+最终架构必须始终保持：
 
 ```text
-User
- ↓
 Supervisor DeepAgent
- ↓
-Knowledge Agent
- ↓
-Final Answer
+    ↓
+决定调用哪些子 Agent
+    ↓
+LangGraph
+    ↓
+执行 / 并发 / 持久化 / 恢复
 ```
-
-### 多 Agent 并行
-
-```text
-User
- ↓
-Supervisor DeepAgent
- ↓
-Planning
- ↓
-Knowledge + Tool + Web
- ↓
-Aggregation
- ↓
-Report Agent
- ↓
-Final Answer + Sources
-```
-
-### Tool Agent
-
-```text
-User
- ↓
-Supervisor
- ↓
-Tool Agent DeepAgent
- ↓
-Skill
- ↓
-MCP Tool Discovery
- ↓
-MCP Tool
- ↓
-Result
- ↓
-Supervisor
-```
-
----
-
-# 12. Phase 10：开发体验与验收
-
-新开发者在 macOS 上应能够：
-
-```bash
-git clone <repository>
-cd officeagent
-cp .env.example .env
-make infra-up
-make dev
-```
-
-然后访问：
-
-```text
-http://localhost:8000
-http://localhost:8000/docs
-```
-
-验收标准：
-
-- Mac Apple Silicon 可运行
-- Intel Mac 可运行
-- Docker 仅运行外部依赖
-- Backend 可本机 Debug
-- Supervisor DeepAgent 可断点调试
-- LangGraph State 可调试
-- Supervisor 可以根据任务决定调用一个或多个子 Agent
-- Knowledge Agent 正常工作
-- Tool Agent + DeepAgents + MCP 正常工作
-- Web Agent + Tavily 正常工作
-- Report Agent 可以生成结构化报告
-- Milvus 正常工作
-- MCP Server 正常工作
-- 企业知识问答可运行
-- 企业数据分析可运行
-- 多 Agent 可并发执行
-- MCP Tool 可动态发现和调用
-- 自动生成分析报告
-- 全链路 Trace 可追踪
-- Supervisor Delegation 可审计
-- 服务异常可恢复
