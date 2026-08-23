@@ -1,0 +1,30 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f6f7f9; color: #171717; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+.auth { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.card { width: min(420px, 100%); background: white; border: 1px solid #e5e7eb; border-radius: 16px; padding: 28px; box-shadow: 0 12px 36px rgba(0,0,0,.08); }
+.card h1 { margin-top: 0; }
+.form { display: grid; gap: 12px; }
+.form input { padding: 12px; border: 1px solid #d1d5db; border-radius: 10px; }
+.primary { border: 0; border-radius: 10px; padding: 12px 16px; background: #111827; color: white; }
+.secondary { border: 1px solid #d1d5db; border-radius: 10px; padding: 9px 12px; background: white; }
+.error { color: #b91c1c; font-size: 14px; }
+.app { height: 100vh; display: grid; grid-template-columns: 280px 1fr; }
+.sidebar { background: #fff; border-right: 1px solid #e5e7eb; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.sessions { overflow: auto; display: grid; gap: 6px; }
+.session { text-align: left; border: 0; background: transparent; border-radius: 8px; padding: 10px; }
+.session.active, .session:hover { background: #f3f4f6; }
+.session small { display: block; color: #6b7280; margin-top: 4px; }
+.profile { margin-top: auto; border-top: 1px solid #eee; padding-top: 12px; font-size: 13px; }
+.chat { min-width: 0; display: grid; grid-template-rows: auto 1fr auto; }
+.header { background: white; border-bottom: 1px solid #e5e7eb; padding: 14px 22px; display: flex; justify-content: space-between; gap: 16px; }
+.debug { font-size: 11px; color: #6b7280; text-align: right; }
+.messages { overflow: auto; padding: 28px max(24px, calc((100vw - 900px) / 2)); display: grid; align-content: start; gap: 18px; }
+.message { max-width: 760px; padding: 13px 16px; border-radius: 14px; white-space: pre-wrap; line-height: 1.55; }
+.message.user { justify-self: end; background: #111827; color: white; }
+.message.assistant { justify-self: start; background: white; border: 1px solid #e5e7eb; }
+.citations { margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee; font-size: 12px; color: #4b5563; }
+.composer { background: white; border-top: 1px solid #e5e7eb; padding: 14px max(24px, calc((100vw - 900px) / 2)); display: flex; gap: 10px; }
+.composer input { flex: 1; padding: 13px; border: 1px solid #d1d5db; border-radius: 12px; }
+@media (max-width: 760px) { .app { grid-template-columns: 1fr; } .sidebar { display: none; } .debug { display: none; } }
