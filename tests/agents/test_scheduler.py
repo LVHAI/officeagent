@@ -59,7 +59,11 @@ async def test_failed_dependency_blocks_dependent_but_not_independent_branch():
     async def execute(task: ExecutionTask):
         called.append(task.task_id)
         status = "failed" if task.task_id == "bad" else "completed"
-        return ({"agent_id": task.agent, "status": status, "errors": [] if status == "completed" else ["boom"], "traces": []}, {})
+        errors = [] if status == "completed" else ["boom"]
+        return (
+            {"agent_id": task.agent, "status": status, "errors": errors, "traces": []},
+            {},
+        )
 
     results = await execute_with_dependencies(tasks, execute, max_parallel=2)
 
