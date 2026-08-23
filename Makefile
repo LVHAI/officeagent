@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down infra-logs infra-status infra-reset seed-crm-db dev test lint
+.PHONY: infra-up infra-down infra-logs infra-status infra-reset seed-crm-db dev web-dev test lint
 
 infra-up:
 	bash scripts/start-infra.sh
@@ -20,6 +20,9 @@ seed-crm-db:
 
 dev:
 	python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+web-dev:
+	cd web && npm install && npm run dev
 
 test:
 	python -m pytest
