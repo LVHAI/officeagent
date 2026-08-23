@@ -15,6 +15,7 @@
 | Phase 8 | 错误处理与可观测性 |
 | Phase 9 | 测试策略（TDD） |
 | Phase 10 | 性能与 Context 控制 |
+| Phase 11 | Web UI / Authentication / Conversation |
 
 ## Phase Documents
 
@@ -29,6 +30,7 @@
 - [Phase 8：错误处理与可观测性](plan/phase-08-observability.md)
 - [Phase 9：测试策略（TDD）](plan/phase-09-testing.md)
 - [Phase 10：性能与 Context 控制](plan/phase-10-context.md)
+- [Phase 11：Web UI / Authentication / Conversation](plan/phase-11-web-auth-chat.md)
 
 ## 1. 实施目标
 
