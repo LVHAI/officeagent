@@ -7,8 +7,6 @@ from collections.abc import Callable, Iterable, Sequence
 from app.rag.models import DocumentChunk
 
 
-# 政策 JSON 的条款编号可能使用中文数字（包括“零/〇”）或阿拉伯数字。
-# 例如：第一条、第十条、第九十九条、第一百零一条、第101条。
 _POLICY_ARTICLE_NUMBER = r"[零〇一二三四五六七八九十百千万亿0-9]+"
 _POLICY_KEY_PATTERN = re.compile(
     rf"^(?P<document>.+?)\s+(?P<article>第{_POLICY_ARTICLE_NUMBER}条)$"
@@ -43,7 +41,10 @@ def _policy_json_nodes(text: str) -> list[DocumentChunk] | None:
                     metadata={
                         "document": match.group("document").strip(),
                         "doc_type": "policy",
+                        "chunk_type": "article",
                         "article": match.group("article"),
+                        "chapter": None,
+                        "department": None,
                     },
                 )
             )
@@ -67,7 +68,14 @@ def policy_nodes(text: str, document: str) -> list[DocumentChunk]:
             DocumentChunk(
                 id=f"policy_{index:05d}",
                 content=match.group(1).strip(),
-                metadata={"document": document, "doc_type": "policy", "article": article_name},
+                metadata={
+                    "document": document,
+                    "doc_type": "policy",
+                    "chunk_type": "article",
+                    "article": article_name,
+                    "chapter": None,
+                    "department": None,
+                },
             )
         )
     return chunks
@@ -88,18 +96,12 @@ def semantic_chunks(
     embedder: Callable[[Sequence[str]], Sequence[Sequence[float]]] | None = None,
     max_chars: int = 1200,
 ) -> list[str]:
-    """按相邻文本 embedding 相似度切分语义块。
-
-    threshold 越高，越容易在语义变化处断开。传入 embedder 时执行真正的
-    embedding 相似度边界判断；未提供 embedder 时保留确定性的长度 fallback，
-    避免测试和离线环境依赖外部 embedding 服务。
-    """
+    """按相邻文本 embedding 相似度切分语义块。"""
     if not 0 < threshold <= 1:
         raise ValueError("threshold 必须在 (0, 1] 范围内")
     units = [s.strip() for s in sentences if s and s.strip()]
     if not units:
         return []
-
     if embedder is None:
         chunks: list[str] = []
         current: list[str] = []
@@ -150,14 +152,20 @@ def semantic_nodes(
     embedder: Callable[[Sequence[str]], Sequence[Sequence[float]]] | None = None,
     max_chars: int = 1200,
 ) -> list[DocumentChunk]:
-    """解析 semantic/*.md 等文档并生成带 metadata 的语义 Chunk。"""
     units = split_sentences(text)
     chunks = semantic_chunks(units, threshold=threshold, embedder=embedder, max_chars=max_chars)
     return [
         DocumentChunk(
             id=f"semantic_{index:05d}",
             content=content,
-            metadata={"document": document, "doc_type": "semantic", "chunk_index": index},
+            metadata={
+                "document": document,
+                "doc_type": "semantic",
+                "chunk_type": "semantic",
+                "chunk_index": index,
+                "chapter": None,
+                "department": None,
+            },
         )
         for index, content in enumerate(chunks, start=1)
     ]
