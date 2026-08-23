@@ -1,7 +1,7 @@
 import pytest
 
 from app.agents.mcp_client import MCPTool
-from app.agents.skills import Skill, SkillRegistry
+from app.agents.skills import Skill, SkillRegistry, build_skill_runtime_tools, load_skill_metadata
 
 
 def test_skill_registry_loads_only_allowed_tools():
@@ -21,13 +21,41 @@ def test_unknown_skill_is_rejected():
         SkillRegistry().get("missing")
 
 
-def test_deepagent_uses_project_skills_for_tool_agent(monkeypatch):
+def test_skill_metadata_contains_explicit_mcp_boundary():
+    from pathlib import Path
+
+    registry = load_skill_metadata(Path(__file__).resolve().parents[2] / "skills")
+    crm = registry.get("crm")
+    sql = registry.get("sql")
+
+    assert crm.mcp_server == "database"
+    assert crm.tool_names == ("sql_query",)
+    assert sql.mcp_server == "database"
+    assert sql.tool_names == ("sql_query",)
+
+
+def test_tool_runtime_exposes_only_skill_operations():
+    registry = SkillRegistry([
+        Skill("crm", "CRM operations", ("sql_query",), "database"),
+    ])
+
+    runtime_tools = build_skill_runtime_tools(registry, lambda _: object())
+
+    assert [tool.name for tool in runtime_tools] == [
+        "discover_skill_mcp_tools",
+        "invoke_skill_mcp_tool",
+    ]
+    assert all(tool.name != "sql_query" for tool in runtime_tools)
+
+
+def test_deepagent_does_not_receive_concrete_mcp_tools(monkeypatch):
     import app.agents.deepagents as deepagents_module
 
     captured = {}
 
     monkeypatch.setattr(deepagents_module, "build_chat_model", lambda: object())
     monkeypatch.setattr(deepagents_module, "build_tavily_search", lambda: None)
+    monkeypatch.setattr(deepagents_module.mcp_registry, "get_client", lambda _: object())
 
     def fake_create_deep_agent(**kwargs):
         captured.update(kwargs)
@@ -35,40 +63,46 @@ def test_deepagent_uses_project_skills_for_tool_agent(monkeypatch):
 
     monkeypatch.setattr(deepagents_module, "create_deep_agent", fake_create_deep_agent)
 
-    tools = [
-        MCPTool("customer_query", "查询客户", {}),
-        MCPTool("sql_query", "执行 SQL", {}),
-        MCPTool("report_generate", "生成报告", {}),
-    ]
-    deepagents_module.create_supervisor(tool_tools=tools)
-
-    assert "skills" not in captured
-    assert captured["backend"] is not None
+    deepagents_module.create_supervisor(
+        tool_tools=[
+            MCPTool("customer_query", "查询客户", {}),
+            MCPTool("sql_query", "执行 SQL", {}),
+            MCPTool("report_generate", "生成报告", {}),
+        ]
+    )
 
     tool_agent = next(item for item in captured["subagents"] if item["name"] == "tool-agent")
     assert tool_agent["skills"] == ["/skills/"]
     assert [tool.name for tool in tool_agent["tools"]] == [
-        "customer_query",
-        "sql_query",
-        "report_generate",
+        "discover_skill_mcp_tools",
+        "invoke_skill_mcp_tool",
     ]
 
 
-def test_tool_agent_does_not_hardcode_crm_to_sql():
+def test_supervisor_routes_enterprise_data_to_tool_agent():
     import app.agents.deepagents as deepagents_module
 
-    assert "customer" in deepagents_module.TOOL_PROMPT.lower()
-    assert "not automatically" in deepagents_module.TOOL_PROMPT.lower()
-    assert "sql" in deepagents_module.TOOL_PROMPT.lower()
+    prompt = deepagents_module.SUPERVISOR_PROMPT.lower()
+    assert "enterprise live/transactional/business data queries must delegate to tool-agent" in prompt
+    assert "knowledge-agent is only for enterprise documents/knowledge/rag content" in prompt
 
 
-def test_project_skills_have_deepagent_frontmatter():
+def test_tool_agent_requires_skill_before_mcp():
+    import app.agents.deepagents as deepagents_module
+
+    prompt = deepagents_module.TOOL_PROMPT.lower()
+    assert "select exactly the skill" in prompt
+    assert "discover_skill_mcp_tools" in prompt
+    assert "invoke_skill_mcp_tool" in prompt
+    assert "not registered in your agent context" in prompt
+
+
+def test_project_skills_have_valid_frontmatter():
     from pathlib import Path
 
     expected = {
         "crm": "CRM customer analysis and PostgreSQL access through the Database MCP sql_query tool.",
         "sql": "Generic read-only PostgreSQL analysis through the Database MCP Server.",
-        "report": "Executive-ready report aggregation from validated agent outputs.",
     }
     root = Path(__file__).resolve().parents[2]
 
@@ -77,4 +111,6 @@ def test_project_skills_have_deepagent_frontmatter():
         assert content.startswith("---\n")
         assert f"name: {skill_name}\n" in content
         assert f"description: {description}\n" in content
+        assert "mcp_server: database\n" in content
+        assert "  - sql_query\n" in content
         assert "\n---\n" in content
