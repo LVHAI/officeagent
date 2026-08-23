@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -136,6 +138,14 @@ def _literal_type(values: tuple[str, ...]) -> Any:
     return Literal.__getitem__(values)
 
 
+def _serialize_tool_arguments(arguments: dict[str, Any]) -> str:
+    """Serialize tool arguments for logs without failing on non-JSON-native values."""
+    try:
+        return json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:  # noqa: BLE001 - logging must never break tool execution
+        return repr(arguments)
+
+
 async def discover_skill_tools(
     client: MCPClient,
     registry: SkillRegistry,
@@ -240,27 +250,37 @@ def build_skill_runtime_tools(
             raise ValueError(f"MCP tool {tool_name!r} was not discovered for Skill {skill_name!r}")
 
         client = get_client(skill.mcp_server)
+        arguments_text = _serialize_tool_arguments(arguments)
+        sql = arguments.get("sql") if isinstance(arguments, dict) else None
+        started = time.perf_counter()
         logger.info(
-            "skill.mcp.invoke.start skill=%s server=%s tool=%s",
+            "skill.mcp.invoke.start skill=%s server=%s tool=%s arguments=%s sql=%s",
             skill.name,
             skill.mcp_server,
             definition.name,
+            arguments_text,
+            sql if sql is not None else "-",
         )
         try:
             result = await client.call(definition.name, arguments)
         except Exception:
             logger.exception(
-                "skill.mcp.invoke.failed skill=%s server=%s tool=%s",
+                "skill.mcp.invoke.failed skill=%s server=%s tool=%s elapsed_ms=%.1f arguments=%s sql=%s",
                 skill.name,
                 skill.mcp_server,
                 definition.name,
+                (time.perf_counter() - started) * 1000,
+                arguments_text,
+                sql if sql is not None else "-",
             )
             raise
         logger.info(
-            "skill.mcp.invoke.completed skill=%s server=%s tool=%s",
+            "skill.mcp.invoke.completed skill=%s server=%s tool=%s elapsed_ms=%.1f result_type=%s",
             skill.name,
             skill.mcp_server,
             definition.name,
+            (time.perf_counter() - started) * 1000,
+            type(result).__name__,
         )
         return result
 
