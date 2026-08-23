@@ -20,6 +20,7 @@ from app.agents.deepagents import (
 )
 from app.agents.execution_plan import ExecutionPlan, ExecutionTask
 from app.agents.planner import create_execution_planner, extract_execution_plan
+from app.agents.scheduler import execute_with_dependencies
 from app.core.checkpoint import get_checkpointer
 from app.core.config import settings
 from app.core.execution import retry_async, run_with_timeout
@@ -173,42 +174,41 @@ def _runtime_for(agent: str):
     }[agent]
 
 
-async def _execute_task(task: ExecutionTask, task_id: str, semaphore: asyncio.Semaphore) -> tuple[dict[str, Any], dict[str, Any]]:
-    async with semaphore:
-        started = time.perf_counter()
-        logger.info(
-            "workflow.task.start task_id=%s execution_task_id=%s agent=%s parallel_group=%s",
-            task_id, task.task_id, task.agent, task.parallel_group,
+async def _execute_task(task: ExecutionTask, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    started = time.perf_counter()
+    logger.info(
+        "workflow.task.start task_id=%s execution_task_id=%s agent=%s parallel_group=%s depends_on=%s",
+        task_id, task.task_id, task.agent, task.parallel_group, task.depends_on,
+    )
+    try:
+        result, trace = await _invoke(
+            _runtime_for(task.agent)(), task.query, task.agent, task_id, parent_agent_id="supervisor"
         )
-        try:
-            result, trace = await _invoke(
-                _runtime_for(task.agent)(), task.query, task.agent, task_id, parent_agent_id="supervisor"
-            )
-            output = _agent_output(task.agent, result, trace)
-            delegation = _delegation(task_id, task, "completed", elapsed_ms=(time.perf_counter() - started) * 1000)
-            logger.info(
-                "workflow.task.completed task_id=%s execution_task_id=%s agent=%s elapsed_ms=%.1f",
-                task_id, task.task_id, task.agent, (time.perf_counter() - started) * 1000,
-            )
-            return output, delegation
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            output = _agent_output(
-                task.agent,
-                None,
-                {"agent_id": task.agent, "status": "failed", "error": str(exc)},
-                status="failed",
-                errors=[str(exc)],
-            )
-            delegation = _delegation(
-                task_id, task, "failed", elapsed_ms=(time.perf_counter() - started) * 1000, error=str(exc)
-            )
-            logger.exception(
-                "workflow.task.failed task_id=%s execution_task_id=%s agent=%s error_type=%s",
-                task_id, task.task_id, task.agent, type(exc).__name__,
-            )
-            return output, delegation
+        output = _agent_output(task.agent, result, trace)
+        delegation = _delegation(task_id, task, "completed", elapsed_ms=(time.perf_counter() - started) * 1000)
+        logger.info(
+            "workflow.task.completed task_id=%s execution_task_id=%s agent=%s elapsed_ms=%.1f",
+            task_id, task.task_id, task.agent, (time.perf_counter() - started) * 1000,
+        )
+        return output, delegation
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        output = _agent_output(
+            task.agent,
+            None,
+            {"agent_id": task.agent, "status": "failed", "error": str(exc)},
+            status="failed",
+            errors=[str(exc)],
+        )
+        delegation = _delegation(
+            task_id, task, "failed", elapsed_ms=(time.perf_counter() - started) * 1000, error=str(exc)
+        )
+        logger.exception(
+            "workflow.task.failed task_id=%s execution_task_id=%s agent=%s error_type=%s",
+            task_id, task.task_id, task.agent, type(exc).__name__,
+        )
+        return output, delegation
 
 
 def _plan_query(query: str, prior_context: dict[str, Any] | None = None) -> str:
@@ -253,9 +253,6 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
             "workflow.supervisor.plan.failed task_id=%s error_type=%s",
             task_id, type(exc).__name__,
         )
-        # Do not emit an invalid/empty ExecutionPlan. The graph router will send
-        # this state directly to Report so a planner failure cannot crash
-        # execute_plan_node with Pydantic's "tasks field required" error.
         return {
             "status": "partial",
             "errors": [f"supervisor planning: {exc}"],
@@ -290,12 +287,15 @@ def _route_after_supervisor(state: AgentState) -> str:
 async def execute_plan_node(state: AgentState) -> dict[str, Any]:
     plan = ExecutionPlan.model_validate(state["execution_plan"])
     task_id = state["task_id"]
-    semaphore = asyncio.Semaphore(MAX_PARALLEL_AGENTS)
     logger.info(
         "workflow.parallel.start task_id=%s tasks=%d max_parallel=%d",
         task_id, len(plan.tasks), MAX_PARALLEL_AGENTS,
     )
-    results = await asyncio.gather(*[_execute_task(task, task_id, semaphore) for task in plan.tasks])
+    results = await execute_with_dependencies(
+        plan.tasks,
+        lambda task: _execute_task(task, task_id),
+        max_parallel=MAX_PARALLEL_AGENTS,
+    )
     outputs = [item[0] for item in results]
     delegations = [item[1] for item in results]
     traces = [trace for output in outputs for trace in output.get("traces", [])]
@@ -393,8 +393,6 @@ def build_workflow():
     graph.add_node("replan", replan_node)
     graph.add_node("report", report_node)
     graph.add_edge(START, "supervisor")
-    # A planner failure is a recoverable workflow state, not an execution-plan
-    # validation error. Route it to report instead of invoking execute_plan.
     graph.add_conditional_edges(
         "supervisor",
         _route_after_supervisor,
@@ -412,7 +410,8 @@ def build_workflow():
     workflow = graph.compile(checkpointer=checkpointer)
     logger.info(
         "workflow.build.completed elapsed_ms=%.1f checkpointer=%s",
-        (time.perf_counter() - started) * 1000, type(checkpointer).__name__,
+        (time.perf_counter() - started) * 1000,
+        type(checkpointer).__name__,
     )
     return workflow
 
