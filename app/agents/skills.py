@@ -18,14 +18,26 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Skill:
-    """Skill metadata plus the complete instructions from SKILL.md."""
+    """Skill frontmatter metadata; SKILL.md body is loaded lazily on selection."""
 
     name: str
     description: str
-    instructions: str = ""
     tool_names: tuple[str, ...] = ()
     mcp_server: str | None = None
     path: Path | None = None
+
+    def load_instructions(self) -> str:
+        """Load the complete SKILL.md body only after this Skill has been selected."""
+        if self.path is None:
+            return ""
+        instructions = _read_skill_body(self.path)
+        logger.info(
+            "skill.content.loaded name=%s path=%s instructions_length=%d",
+            self.name,
+            self.path,
+            len(instructions),
+        )
+        return instructions
 
 
 class SkillRegistry:
@@ -71,7 +83,7 @@ class SkillRegistry:
 
 
 def load_skill_metadata(skills_root: Path) -> SkillRegistry:
-    """Load Skill metadata and the complete SKILL.md body for runtime use."""
+    """Load only Skill frontmatter metadata; SKILL.md bodies remain lazy."""
     registry = SkillRegistry()
     if not skills_root.exists():
         return registry
@@ -82,22 +94,19 @@ def load_skill_metadata(skills_root: Path) -> SkillRegistry:
         description = str(frontmatter.get("description") or "").strip()
         mcp_server = str(frontmatter.get("mcp_server") or "").strip() or None
         tool_names = tuple(_parse_list(frontmatter.get("mcp_tools", "")))
-        instructions = _read_skill_body(skill_file)
         registry.register(
             Skill(
                 name=name,
                 description=description,
-                instructions=instructions,
                 tool_names=tool_names,
                 mcp_server=mcp_server,
                 path=skill_file,
             )
         )
         logger.info(
-            "skill.load name=%s path=%s instructions_length=%d mcp_server=%s tools=%s",
+            "skill.metadata.loaded name=%s path=%s mcp_server=%s tools=%s",
             name,
             skill_file,
-            len(instructions),
             mcp_server or "-",
             list(tool_names),
         )
@@ -185,12 +194,11 @@ async def discover_skill_tools(
     definitions = await client.discover_tools()
     selected = registry.select_tools(skill_name, definitions)
     logger.info(
-        "skill.mcp.discovery skill=%s server=%s discovered=%d selected=%d instructions_length=%d",
+        "skill.mcp.discovery skill=%s server=%s discovered=%d selected=%d",
         skill.name,
         skill.mcp_server,
         len(definitions),
         len(selected),
-        len(skill.instructions),
     )
     return selected
 
@@ -217,18 +225,44 @@ def build_skill_runtime_tools(
     # Runtime tools are created per Tool Agent instance, so this cache is scoped to
     # that agent/request lifecycle rather than shared globally between requests.
     discovered_tools: dict[str, dict[str, MCPTool]] = {}
+    skill_instructions: dict[str, str] = {}
 
     async def discover_skill_mcp_tools(skill_name: str) -> dict[str, Any]:
         skill = registry.get(skill_name)
+
+        # Frontmatter is loaded during registry initialization. The complete SKILL.md
+        # body is intentionally loaded only after the Agent has selected this Skill.
+        instructions = skill_instructions.get(skill_name)
+        if instructions is None:
+            logger.info(
+                "skill.content.load.start skill=%s path=%s",
+                skill.name,
+                skill.path,
+            )
+            instructions = skill.load_instructions()
+            skill_instructions[skill_name] = instructions
+            logger.info(
+                "skill.content.load.completed skill=%s path=%s instructions_length=%d",
+                skill.name,
+                skill.path,
+                len(instructions),
+            )
+        else:
+            logger.info(
+                "skill.content.cache_hit skill=%s instructions_length=%d",
+                skill.name,
+                len(instructions),
+            )
+
         if not skill.mcp_server:
             logger.info(
                 "skill.mcp.discovery.no_server skill=%s instructions_length=%d",
                 skill.name,
-                len(skill.instructions),
+                len(instructions),
             )
             return {
                 "skill_name": skill.name,
-                "instructions": skill.instructions,
+                "instructions": instructions,
                 "tools": [],
             }
 
@@ -239,16 +273,15 @@ def build_skill_runtime_tools(
                 skill.name,
                 skill.mcp_server,
                 len(cached),
-                len(skill.instructions),
+                len(instructions),
             )
             definitions = list(cached.values())
         else:
             client = get_client(skill.mcp_server)
             logger.info(
-                "skill.mcp.discovery.start skill=%s server=%s instructions_length=%d",
+                "skill.mcp.discovery.start skill=%s server=%s",
                 skill.name,
                 skill.mcp_server,
-                len(skill.instructions),
             )
             definitions = await discover_skill_tools(client, registry, skill_name)
             discovered_tools[skill_name] = {definition.name: definition for definition in definitions}
@@ -257,12 +290,12 @@ def build_skill_runtime_tools(
                 skill.name,
                 skill.mcp_server,
                 len(definitions),
-                len(skill.instructions),
+                len(instructions),
             )
 
         return {
             "skill_name": skill.name,
-            "instructions": skill.instructions,
+            "instructions": instructions,
             "tools": [
                 {
                     "name": definition.name,
@@ -299,14 +332,13 @@ def build_skill_runtime_tools(
         sql = arguments.get("sql") if isinstance(arguments, dict) else None
         started = time.perf_counter()
         logger.info(
-            "skill.mcp.invoke.start invocation_id=%s skill=%s server=%s tool=%s arguments=%s sql=%s instructions_length=%d",
+            "skill.mcp.invoke.start invocation_id=%s skill=%s server=%s tool=%s arguments=%s sql=%s",
             invocation_id,
             skill.name,
             skill.mcp_server,
             definition.name,
             arguments_text,
             sql if sql is not None else "-",
-            len(skill.instructions),
         )
         try:
             result = await client.call(definition.name, arguments)
@@ -341,9 +373,11 @@ def build_skill_runtime_tools(
             name="discover_skill_mcp_tools",
             description=(
                 "Select a registered Skill and discover its authorized MCP tools. "
-                "This operation returns the COMPLETE SKILL.md instructions together with "
-                "the discovered MCP schemas. You MUST follow the returned Skill instructions "
-                "and schema when constructing the next MCP call. "
+                "Skill frontmatter is loaded during startup; the COMPLETE SKILL.md body "
+                "is loaded only after the Skill is selected. The operation returns that "
+                "complete Skill content together with discovered MCP schemas. You MUST "
+                "follow the returned Skill instructions and schema when constructing the "
+                "next MCP call. "
                 f"Canonical Skill names are: {available_skills}. "
                 "The Skill name must exactly match a registered Skill; do not invent aliases."
             ),
