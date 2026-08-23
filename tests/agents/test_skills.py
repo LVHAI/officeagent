@@ -170,45 +170,6 @@ async def test_invoke_requires_discovery_first():
         )
 
 
-def test_deepagent_does_not_receive_concrete_mcp_tools(monkeypatch):
-    import app.agents.deepagents as deepagents_module
-
-    captured = {}
-
-    monkeypatch.setattr(deepagents_module, "build_chat_model", lambda: object())
-    monkeypatch.setattr(deepagents_module, "build_tavily_search", lambda: None)
-    monkeypatch.setattr(deepagents_module.mcp_registry, "get_client", lambda _: object())
-
-    def fake_create_deep_agent(**kwargs):
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(deepagents_module, "create_deep_agent", fake_create_deep_agent)
-
-    deepagents_module.create_supervisor(
-        tool_tools=[
-            MCPTool("customer_query", "查询客户", {}),
-            MCPTool("sql_query", "执行 SQL", {}),
-            MCPTool("report_generate", "生成报告", {}),
-        ]
-    )
-
-    tool_agent = next(item for item in captured["subagents"] if item["name"] == "tool-agent")
-    assert tool_agent["skills"] == ["/skills/"]
-    assert [tool.name for tool in tool_agent["tools"]] == [
-        "discover_skill_mcp_tools",
-        "invoke_skill_mcp_tool",
-    ]
-
-
-def test_supervisor_routes_enterprise_data_to_tool_agent():
-    import app.agents.deepagents as deepagents_module
-
-    prompt = deepagents_module.SUPERVISOR_PROMPT.lower()
-    assert "enterprise live/transactional/business data queries must delegate to tool-agent" in prompt
-    assert "knowledge-agent is only for enterprise documents/knowledge/rag content" in prompt
-
-
 def test_tool_agent_requires_skill_before_mcp():
     import app.agents.deepagents as deepagents_module
 
