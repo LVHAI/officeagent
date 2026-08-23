@@ -26,37 +26,6 @@ SKILL_REGISTRY = load_skill_metadata(PROJECT_ROOT / "skills")
 CANONICAL_SKILL_NAMES = ", ".join(sorted(skill.name for skill in SKILL_REGISTRY.all())) or "<none>"
 
 
-SUPERVISOR_PROMPT = """
-You are the Supervisor Agent for an enterprise intelligence platform.
-You are the Multi-Agent planning and delegation center. Understand the user's intent,
-create an execution plan, and delegate work to the minimum required specialized
-subagents. Do not execute enterprise business-data work yourself.
-
-Routing rules are mandatory:
-- Knowledge questions, how-to questions, recipes, manuals, policies, FAQs, product
-  documentation, internal documents, and other questions that may be answered from
-  the configured Knowledge Base MUST delegate to knowledge-agent. Do not answer from
-  the model's general knowledge when the Knowledge Base may contain the answer.
-- Knowledge-agent owns the RAG pipeline directly. It MUST NOT use MCP for knowledge
-  retrieval.
-- Requests requiring current or external internet information MUST delegate to
-  web-agent. Do not use web-agent merely because a question is a general knowledge
-  question; use it when fresh/external evidence is required.
-- Enterprise live/transactional/business data queries MUST delegate to tool-agent.
-- Customer, CRM, order, sales, finance, ERP, inventory, or other enterprise-system
-  data requests are Tool Agent work even when the request sounds like a knowledge
-  question. Do NOT delegate these requests to knowledge-agent merely because the
-  request contains words such as "query", "information", or "analysis".
-- If a request combines independent Knowledge Base and enterprise-data work, delegate
-  only the necessary agents; do not call every agent by default.
-- If a request combines Knowledge Base and current web research, delegate both
-  knowledge-agent and web-agent and let the Report Agent reconcile the evidence.
-
-Preserve partial results when a subagent fails and never fabricate missing evidence.
-Return source-aware results. Let Tool Agent perform Skill Selection and MCP Tool
-Selection; the Supervisor must not depend on concrete MCP Tool schemas.
-""".strip()
-
 KNOWLEDGE_PROMPT = """
 You are the Knowledge Agent. Your only retrieval mechanism is the configured
 Knowledge Base RAG pipeline. Call the knowledge_search tool for every knowledge
@@ -213,51 +182,6 @@ def build_agent_backend() -> Any:
     )
 
 
-def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_tools=None):
-    model = build_chat_model()
-    web_tool = build_tavily_search() if web_tools is None else None
-    external_tools = web_tools if web_tools is not None else [web_tool]
-    skill_runtime_tools = build_skill_runtime_tools(SKILL_REGISTRY, mcp_registry.get_client)
-    effective_knowledge_tools = knowledge_tools or [knowledge_search]
-    logger.info(
-        "agent.create supervisor model=%s knowledge_tools=%d tool_agent_tools=%d web_tools=%d tool_agent_skills=%s",
-        settings.llm_model,
-        len(effective_knowledge_tools),
-        len(skill_runtime_tools),
-        len(external_tools),
-        SKILLS_PATH,
-    )
-    return create_deep_agent(
-        model=model,
-        system_prompt=SUPERVISOR_PROMPT,
-        backend=build_agent_backend(),
-        subagents=[
-            {
-                "name": "knowledge-agent",
-                "description": "Answer Knowledge Base questions through the direct RAG pipeline. Never use MCP, Skills, enterprise-system tools, or Web Search.",
-                "system_prompt": KNOWLEDGE_PROMPT,
-                "model": model,
-                "tools": effective_knowledge_tools,
-            },
-            {
-                "name": "tool-agent",
-                "description": f"Handle live enterprise business data. Select exactly one matching Skill from [{CANONICAL_SKILL_NAMES}], discover it through Skill Runtime, apply the complete returned SKILL.md instructions, then dynamically invoke only that Skill's authorized MCP tools.",
-                "system_prompt": TOOL_PROMPT,
-                "model": model,
-                "tools": skill_runtime_tools,
-                "skills": [SKILLS_PATH],
-            },
-            {
-                "name": "web-agent",
-                "description": "Retrieve current external information with the mandatory web_search tool. Do not use for internal Knowledge Base data.",
-                "system_prompt": WEB_PROMPT,
-                "model": model,
-                "tools": external_tools,
-            },
-        ],
-    )
-
-
 def create_knowledge_agent(tools=None):
     return create_agent(
         model=build_chat_model(),
@@ -302,51 +226,32 @@ class _ReportAgent:
             raise ValueError(
                 f"Report Agent must call submit_analysis_report exactly once; got {len(tool_calls)}"
             )
-
         call = tool_calls[0]
         name = call.get("name")
         if name != "submit_analysis_report":
             raise ValueError(f"Unexpected Report Agent tool call: {name!r}")
-
         args = call.get("args")
         if not isinstance(args, dict):
             raise ValueError("submit_analysis_report tool arguments must be an object")
-
-        try:
-            return AnalysisReport.model_validate(args)
-        except Exception as exc:
-            logger.exception(
-                "report.validation.failed tool=submit_analysis_report error_type=%s error=%s",
-                type(exc).__name__,
-                exc,
-            )
-            raise
+        return AnalysisReport.model_validate(args)
 
     async def ainvoke(self, request: dict[str, Any]) -> AnalysisReport:
         task_id = str(request.get("task_id", "unknown"))
         messages = request.get("messages", [])
         context = messages[-1].get("content", "") if messages else ""
+        started = time.perf_counter()
         logger.info(
             "report.invoke.start task_id=%s model=%s context_length=%d tool=submit_analysis_report",
             task_id,
             settings.llm_model,
             len(str(context)),
         )
-
-        started = time.perf_counter()
         try:
             response = await ainvoke_chat_model(
                 self._tool_model,
                 f"{REPORT_PROMPT}\n\nValidated context:\n{context}",
                 agent_id="report",
                 task_id=task_id,
-            )
-            tool_calls = getattr(response, "tool_calls", None) or []
-            logger.info(
-                "report.tool_call.received task_id=%s call_count=%d names=%s",
-                task_id,
-                len(tool_calls),
-                [call.get("name") for call in tool_calls],
             )
             report = self._extract_report(response)
         except Exception as exc:
@@ -358,7 +263,6 @@ class _ReportAgent:
                 exc,
             )
             raise
-
         logger.info(
             "report.invoke.completed task_id=%s elapsed_ms=%.1f findings=%d recommendations=%d sources=%d partial_results=%d",
             task_id,
