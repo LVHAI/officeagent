@@ -1,6 +1,9 @@
 ---
 name: sql
 description: Generic read-only PostgreSQL analysis through the Database MCP Server.
+mcp_server: database
+mcp_tools:
+  - sql_query
 ---
 
 # Database SQL
@@ -49,4 +52,6 @@ For a request such as:
 
 route the request through the `CRM Customer Analysis` skill rather than treating
 it as a generic SQL task. The CRM skill uses the Database MCP `sql_query` tool
-against the `customers` and `customer_orders` tables.
+against the runtime-verified `customers` and `orders` tables when those are the
+available database tables. Do not assume a different purchase table without
+schema discovery.
