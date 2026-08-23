@@ -5,6 +5,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.api.analysis import run_analysis
 from app.core.auth import current_user
 from app.core.memory_store import PostgresMemoryStore
 
@@ -53,6 +54,12 @@ def get_conversation(session_id: str, user: dict = Depends(current_user)) -> dic
 def get_conversation_messages(session_id: str, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0), user: dict = Depends(current_user)) -> dict:
     _owned_session(session_id, user["user_id"])
     return {"session_id": session_id, "messages": _store.list_messages(session_id, limit=limit, offset=offset), "limit": limit, "offset": offset}
+
+
+@router.post("/conversations/{session_id}/messages")
+async def send_message(session_id: str, request: SendMessageRequest, user: dict = Depends(current_user)) -> dict:
+    _owned_session(session_id, user["user_id"])
+    return await run_analysis(request.query, session_id=session_id, user_id=user["user_id"])
 
 
 @router.delete("/conversations/{session_id}")
