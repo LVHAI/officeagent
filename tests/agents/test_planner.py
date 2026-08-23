@@ -1,7 +1,12 @@
 import json
 
 from app.agents.execution_plan import ExecutionPlan
-from app.agents.planner import PLAN_TOOL, create_execution_planner, extract_execution_plan
+from app.agents.planner import (
+    PLAN_TOOL,
+    create_execution_planner,
+    extract_execution_plan,
+    validate_agent_selection,
+)
 
 
 def test_create_execution_planner_is_importable():
@@ -196,4 +201,6 @@ def test_supervisor_plan_does_not_use_keyword_router_to_rewrite_selection():
         }
     )
 
-    assert [task.agent for task in plan.tasks] == ["knowledge-agent", "tool-agent"]
+    filtered = validate_agent_selection("查询客户数据", plan)
+
+    assert [task.agent for task in filtered.tasks] == ["knowledge-agent", "tool-agent"]
