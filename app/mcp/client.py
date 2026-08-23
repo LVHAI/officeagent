@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.streamable_http import streamablehttp_client
 
 
 class MCPError(RuntimeError):
@@ -45,7 +45,7 @@ class MCPClient:
         """动态读取 MCP Server 的 Tool Schema，不预先把全部工具注入 Agent。"""
         try:
             async with asyncio.timeout(self.timeout):
-                async with streamable_http_client(self.url) as (read, write, _):
+                async with streamablehttp_client(self.url) as (read, write, _):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         response = await session.list_tools()
@@ -71,7 +71,7 @@ class MCPClient:
         started = time.monotonic()
         try:
             async with asyncio.timeout(self.timeout):
-                async with streamable_http_client(self.url) as (read, write, _):
+                async with streamablehttp_client(self.url) as (read, write, _):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         result = await session.call_tool(name, arguments=arguments)
