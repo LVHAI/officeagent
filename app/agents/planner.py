@@ -20,7 +20,8 @@ planner. You must not answer the user's question and you must not execute any ch
 agent, MCP tool, RAG retrieval, or web search yourself.
 
 You MUST call submit_execution_plan exactly once. Create the minimum plan that can
-answer the user's request.
+answer the user's request. Do NOT add a specialist merely because the final task is
+an analysis or synthesis task.
 
 The submit_execution_plan function is the authoritative structured function-calling
 interface. Use ONLY these agent values: knowledge-agent, tool-agent, web-agent.
@@ -47,7 +48,12 @@ Routing rules:
   Result Aggregator / Report Agent after the independent specialist branches finish.
 - A task that only provides evidence to the final report must have no dependency on
   another specialist task.
-- Never select all agents by default.
+- Never select all agents by default. Every selected agent must have an explicit
+  evidence requirement in the user request.
+- Do not select knowledge-agent for generic analysis, reasoning, recommendations,
+  customer analysis, market analysis, or because another agent's result will later be
+  combined with internal knowledge. Select it only when the user actually asks for
+  configured Knowledge Base / internal-document evidence.
 - The Tool Agent decides Skill -> MCP internally; do not mention or invent MCP tool
   names in the plan.
 - The Knowledge Agent owns the RAG pipeline directly.
@@ -71,11 +77,66 @@ _AGENT_ALIASES = {
     "web-agent": "web-agent",
 }
 
+_KNOWLEDGE_SIGNALS = (
+    "知识库",
+    "内部知识",
+    "内部文档",
+    "公司制度",
+    "规章制度",
+    "管理制度",
+    "政策",
+    "手册",
+    "faq",
+    "常见问题",
+    "产品文档",
+    "技术文档",
+    "培训资料",
+    "销售手册",
+    "操作规范",
+    "审批流程",
+    "recipe",
+    "manual",
+    "policy",
+    "internal document",
+    "knowledge base",
+    "product documentation",
+)
+
 
 def _normalize_agent_alias(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     return _AGENT_ALIASES.get(value, value)
+
+
+def _requires_knowledge_base(query: str) -> bool:
+    normalized = query.casefold()
+    return any(signal in normalized for signal in _KNOWLEDGE_SIGNALS)
+
+
+def validate_agent_selection(query: str, plan: ExecutionPlan) -> ExecutionPlan:
+    """Apply the spec's minimum-agent rule as a deterministic post-plan guardrail."""
+    if _requires_knowledge_base(query):
+        return plan
+
+    retained = [task for task in plan.tasks if task.agent != "knowledge-agent"]
+    removed = len(plan.tasks) - len(retained)
+    if not removed:
+        return plan
+
+    if not retained:
+        logger.warning(
+            "supervisor.plan.knowledge_only_without_requirement action=kept query_length=%d",
+            len(query),
+        )
+        return plan
+
+    logger.info(
+        "supervisor.plan.unnecessary_knowledge_removed removed=%d remaining=%d",
+        removed,
+        len(retained),
+    )
+    return plan.model_copy(update={"tasks": retained})
 
 
 class PlannerTaskInput(BaseModel):
