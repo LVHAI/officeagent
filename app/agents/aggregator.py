@@ -59,14 +59,9 @@ def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS)
         if isinstance(messages, list):
             contents = [_message_content(message) for message in messages]
             contents = [content for content in contents if content]
-            compact: dict[str, Any] = {
-                key: value
-                for key, value in result.items()
-                if key not in {"messages", "intermediate_steps", "trace", "metadata"}
-            }
-            if contents:
-                compact["final_evidence"] = _truncate_text("\n\n".join(contents), limit)
-            return compact
+            return {
+                "final_evidence": _truncate_text("\n\n".join(contents), limit)
+            } if contents else {"final_evidence": ""}
 
         encoded = json.dumps(result, ensure_ascii=False, default=str)
         return _truncate_text(encoded, limit)
