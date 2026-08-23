@@ -66,6 +66,23 @@ def test_tool_runtime_exposes_only_skill_operations():
     assert all("crm" in tool.description for tool in runtime_tools)
 
 
+def test_runtime_tool_schema_only_allows_registered_skill_and_mcp_names():
+    registry = SkillRegistry([
+        Skill("crm", "CRM operations", ("sql_query",), "database"),
+        Skill("sql", "SQL operations", ("sql_query",), "database"),
+    ])
+
+    runtime_tools = build_skill_runtime_tools(registry, lambda _: object())
+    discover_tool, invoke_tool = runtime_tools
+    discover_schema = discover_tool.args_schema.model_json_schema()
+    invoke_schema = invoke_tool.args_schema.model_json_schema()
+
+    assert discover_schema["properties"]["skill_name"]["enum"] == ["crm", "sql"]
+    assert invoke_schema["properties"]["skill_name"]["enum"] == ["crm", "sql"]
+    assert invoke_schema["properties"]["tool_name"]["enum"] == ["sql_query"]
+    assert "get_customer_purchases" not in invoke_schema["properties"]["tool_name"]["enum"]
+
+
 def test_deepagent_does_not_receive_concrete_mcp_tools(monkeypatch):
     import app.agents.deepagents as deepagents_module
 
