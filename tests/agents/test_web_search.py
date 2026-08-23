@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -7,6 +8,7 @@ from app.agents.deepagents import build_tavily_search
 
 @pytest.mark.asyncio
 async def test_tavily_search_wrapper_logs_and_preserves_sources(caplog):
+    caplog.set_level(logging.INFO)
     tavily = Mock()
     tavily.ainvoke = AsyncMock(
         return_value=[
