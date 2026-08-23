@@ -6,7 +6,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 import psycopg
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi import Cookie, HTTPException, status
 
 from app.core.config import settings
 
@@ -27,11 +27,11 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, encoded: str) -> bool:
     try:
-        algorithm, rounds, salt_hex, digest_hex = encoded.split("$", 3)
-        if algorithm != "pbkdf2_sha256":
+        algorithm, rounds, salt_hex, _digest_hex = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256" or int(rounds) != 310_000:
             return False
         expected = _hash_password(password, bytes.fromhex(salt_hex))
-        return hmac.compare_digest(expected, encoded) and int(rounds) == 310_000 and digest_hex
+        return hmac.compare_digest(expected, encoded)
     except (ValueError, TypeError):
         return False
 
@@ -42,23 +42,8 @@ def _dsn() -> str:
 
 def setup_auth_store() -> None:
     with psycopg.connect(_dsn()) as conn:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                email TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL
-            )"""
-        )
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS auth_sessions (
-                token_hash TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                expires_at TIMESTAMPTZ NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL
-            )"""
-        )
+        conn.execute("CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)")
         conn.commit()
@@ -69,16 +54,11 @@ def create_user(email: str, password: str) -> dict:
     if not email or "@" not in email:
         raise ValueError("invalid email")
     password_hash = hash_password(password)
-    from uuid import uuid4
-
     now = datetime.now(timezone.utc)
-    user_id = str(uuid4())
+    user_id = str(secrets.token_hex(16))
     with psycopg.connect(_dsn()) as conn:
         try:
-            conn.execute(
-                "INSERT INTO users(user_id, email, password_hash, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)",
-                (user_id, email, password_hash, now, now),
-            )
+            conn.execute("INSERT INTO users(user_id, email, password_hash, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)", (user_id, email, password_hash, now, now))
             conn.commit()
         except psycopg.errors.UniqueViolation:
             conn.rollback()
@@ -99,10 +79,7 @@ def create_session(user_id: str) -> tuple[str, datetime]:
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     expires_at = datetime.now(timezone.utc) + SESSION_TTL
     with psycopg.connect(_dsn()) as conn:
-        conn.execute(
-            "INSERT INTO auth_sessions(token_hash, user_id, expires_at, created_at) VALUES (%s, %s, %s, %s)",
-            (token_hash, user_id, expires_at, datetime.now(timezone.utc)),
-        )
+        conn.execute("INSERT INTO auth_sessions(token_hash, user_id, expires_at, created_at) VALUES (%s, %s, %s, %s)", (token_hash, user_id, expires_at, datetime.now(timezone.utc)))
         conn.commit()
     return token, expires_at
 
@@ -113,11 +90,7 @@ def get_user_by_token(token: str | None) -> dict | None:
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     now = datetime.now(timezone.utc)
     with psycopg.connect(_dsn()) as conn:
-        row = conn.execute(
-            """SELECT u.user_id, u.email FROM auth_sessions s JOIN users u ON u.user_id = s.user_id
-               WHERE s.token_hash = %s AND s.expires_at > %s""",
-            (token_hash, now),
-        ).fetchone()
+        row = conn.execute("SELECT u.user_id, u.email FROM auth_sessions s JOIN users u ON u.user_id = s.user_id WHERE s.token_hash = %s AND s.expires_at > %s", (token_hash, now)).fetchone()
     return {"user_id": row[0], "email": row[1]} if row else None
 
 
@@ -130,7 +103,7 @@ def delete_session(token: str | None) -> None:
         conn.commit()
 
 
-def current_user(token: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict:
+def current_user(token: str | None = None) -> dict:
     user = get_user_by_token(token)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="authentication required")
