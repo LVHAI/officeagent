@@ -34,9 +34,9 @@ async def test_delegation_without_tool_result_remains_delegated_not_completed():
 
 
 @pytest.mark.asyncio
-async def test_failed_delegation_is_preserved_for_partial_reporting():
-    agent = Mock()
-    agent.ainvoke = AsyncMock(
+async def test_failed_delegation_is_redelegated_once_and_failure_is_preserved():
+    supervisor = Mock()
+    supervisor.ainvoke = AsyncMock(
         return_value={
             "messages": [
                 {
@@ -57,10 +57,16 @@ async def test_failed_delegation_is_preserved_for_partial_reporting():
             ]
         }
     )
+    retry_agent = Mock()
+    retry_agent.ainvoke = AsyncMock(side_effect=RuntimeError("database still unavailable"))
 
-    with patch("app.agents.graph.create_supervisor", return_value=agent):
+    with patch("app.agents.graph.create_supervisor", return_value=supervisor), patch(
+        "app.agents.graph.create_tool_agent", return_value=retry_agent
+    ):
         result = await supervisor_node(new_task_state("查询 CRM"))
 
     assert result["delegations"][0]["status"] == "failed"
     assert result["delegations"][0]["error"]
-    assert result["agent_outputs"][0]["status"] == "completed"
+    assert result["delegations"][1]["status"] == "failed"
+    assert result["delegations"][1]["delegation_id"].startswith("retry-")
+    assert result["agent_outputs"][-1]["status"] == "failed"
