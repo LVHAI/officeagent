@@ -11,22 +11,42 @@ from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_tavily import TavilySearch
 
+from app.agents.mcp_registry import mcp_registry
 from app.agents.report_models import AnalysisReport, ReportFinding, ReportSource
 from app.agents.model import build_chat_model, ainvoke_chat_model
+from app.agents.skills import build_skill_runtime_tools, load_skill_metadata
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_PATH = "/skills/"
+SKILL_REGISTRY = load_skill_metadata(PROJECT_ROOT / "skills")
 
 
 SUPERVISOR_PROMPT = """
 You are the Supervisor Agent for an enterprise intelligence platform.
-Understand the user's intent, create an execution plan, and delegate independent
-work to the minimum required specialized subagents. You may delegate to multiple
-subagents when their work is independent. Preserve partial results when a
-subagent fails and never fabricate missing evidence. Return source-aware results.
+You are the Multi-Agent planning and delegation center. Understand the user's intent,
+create an execution plan, and delegate work to the minimum required specialized
+subagents. Do not execute enterprise business-data work yourself.
+
+Routing rules are mandatory:
+- Enterprise live/transactional/business data queries MUST delegate to tool-agent.
+- Customer, CRM, order, sales, finance, ERP, inventory, or other enterprise-system
+  data requests are Tool Agent work even when the request sounds like a knowledge
+  question. Do NOT delegate these requests to knowledge-agent merely because the
+  request contains words such as "query", "information", or "analysis".
+- Knowledge-agent is only for enterprise documents/knowledge/RAG content such as
+  policies, manuals, contracts, product documents, FAQs, and internal knowledge.
+- web-agent is only for current/external web information.
+- If a request combines independent knowledge and enterprise-data work, delegate
+  only the necessary agents; do not call every agent by default.
+- For a clearly enterprise-data-only request, tool-agent should normally be the
+  only specialized subagent delegated before reporting.
+
+Preserve partial results when a subagent fails and never fabricate missing evidence.
+Return source-aware results. Let Tool Agent perform Skill Selection and MCP Tool
+Selection; the Supervisor must not depend on concrete MCP Tool schemas.
 """.strip()
 
 KNOWLEDGE_PROMPT = """
@@ -36,15 +56,29 @@ source metadata such as document, page, section, article, and chunk identifiers.
 """.strip()
 
 TOOL_PROMPT = """
-You are the Tool Agent. Use dynamically discovered MCP skills and tools to query
-enterprise systems. Load the relevant project skill before choosing a tool.
-For each task, first determine which Skill best matches the user's intent, then
-load that Skill's instructions and use only the MCP tools required by that Skill.
-Do not assume a particular implementation (for example CRM is not automatically
-SQL); follow the selected Skill's tool policy. Select the minimum tools required,
-validate tool inputs, never fabricate tool results, and preserve system, tool,
-request and execution metadata. Retry transient failures only within the
-configured reliability policy.
+You are the Tool Agent. Skills are the only business routing layer for enterprise
+MCP access. First inspect the available Skill metadata and select exactly the Skill
+that best matches the user's intent. Then read that Skill's SKILL.md instructions.
+The selected Skill declares which MCP server and MCP tools are allowed.
+
+After selecting the Skill:
+1. Read the selected Skill's complete SKILL.md instructions.
+2. Call `discover_skill_mcp_tools` for that Skill before any MCP invocation.
+3. Select the minimum MCP tool(s) required by the task from the discovered schemas.
+4. Call `invoke_skill_mcp_tool` only with the selected Skill and a discovered,
+   Skill-authorized tool name.
+5. Interpret and preserve the returned evidence; never fabricate results.
+
+Never select tools by matching raw MCP names before selecting a Skill. Never assume
+CRM means SQL or any other implementation; follow the selected Skill exactly.
+Do not call every discovered tool. For a simple customer lookup, use the minimum
+single MCP operation that answers the request. Only use multiple MCP calls when the
+selected Skill instructions and the user's request require independent facts that
+cannot reasonably be obtained together.
+
+The concrete enterprise MCP tools are intentionally NOT registered in your Agent
+context. The two Skill Runtime tools are the only MCP access mechanism. Never bypass
+Skill selection or invoke a concrete MCP tool directly.
 """.strip()
 
 WEB_PROMPT = """
@@ -101,12 +135,12 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
     model = build_chat_model()
     web_tool = build_tavily_search() if web_tools is None else None
     external_tools = web_tools if web_tools is not None else ([web_tool] if web_tool is not None else [])
-    selected_tool_tools = tool_tools or tools or []
+    skill_runtime_tools = build_skill_runtime_tools(SKILL_REGISTRY, mcp_registry.get_client)
     logger.info(
-        "agent.create supervisor model=%s knowledge_tools=%d tool_tools=%d web_tools=%d tool_agent_skills=%s",
+        "agent.create supervisor model=%s knowledge_tools=%d tool_agent_tools=%d web_tools=%d tool_agent_skills=%s",
         settings.llm_model,
         len(knowledge_tools or []),
-        len(selected_tool_tools),
+        len(skill_runtime_tools),
         len(external_tools),
         SKILLS_PATH,
     )
@@ -117,22 +151,22 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
         subagents=[
             {
                 "name": "knowledge-agent",
-                "description": "Retrieve and cite enterprise knowledge through the RAG pipeline.",
+                "description": "Retrieve and cite enterprise knowledge through the RAG pipeline. Do not use for live CRM, sales, order, finance, ERP, inventory, or other enterprise-system data.",
                 "system_prompt": KNOWLEDGE_PROMPT,
                 "model": model,
                 "tools": knowledge_tools or [],
             },
             {
                 "name": "tool-agent",
-                "description": "Query enterprise systems through Skill-selected MCP tools.",
+                "description": "Handle live enterprise business data. Select exactly one matching Skill, read its SKILL.md, then dynamically discover and invoke only that Skill's authorized MCP tools.",
                 "system_prompt": TOOL_PROMPT,
                 "model": model,
-                "tools": selected_tool_tools,
+                "tools": skill_runtime_tools,
                 "skills": [SKILLS_PATH],
             },
             {
                 "name": "web-agent",
-                "description": "Retrieve current external information with Tavily.",
+                "description": "Retrieve current external information with Tavily. Do not use for internal enterprise-system data.",
                 "system_prompt": WEB_PROMPT,
                 "model": model,
                 "tools": external_tools,
