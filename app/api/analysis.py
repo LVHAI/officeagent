@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from asyncio import to_thread
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field
 from app.agents.graph import GLOBAL_TIMEOUT_SECONDS, build_workflow
 from app.core.config import settings
 from app.core.execution import run_with_timeout
+from app.core.memory import build_short_term_context, extract_explicit_memories, render_short_term_context
+from app.core.memory_store import PostgresMemoryStore
 from app.core.postgres_store import PostgresTaskStore
 from app.core.redis_state import get_redis_task_coordinator
 from app.core.task_store import InMemoryTaskStore, TaskRecord, TaskStore
@@ -23,10 +26,13 @@ router = APIRouter(prefix="/api/v1")
 class AnalyzeRequest(BaseModel):
     # 限制输入长度，避免超长 Prompt 放大模型和 Agent 的资源消耗。
     query: str = Field(min_length=1, max_length=8000)
+    session_id: str | None = Field(default=None, min_length=1, max_length=200)
+    user_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 _workflow = None
 _task_store: TaskStore = PostgresTaskStore() if settings.environment != "test" else InMemoryTaskStore()
+_memory_store = PostgresMemoryStore()
 
 
 def _get_workflow():
@@ -43,13 +49,16 @@ def _get_workflow():
 
 
 def configure_task_store(store: TaskStore) -> None:
-    """允许测试和本地调试注入内存实现，避免强依赖 PostgreSQL。"""
     global _task_store
     _task_store = store
 
 
+def configure_memory_store(store: PostgresMemoryStore) -> None:
+    global _memory_store
+    _memory_store = store
+
+
 def initialize_task_store() -> None:
-    """Initialize the configured persistent task store before serving requests."""
     setup = getattr(_task_store, "setup", None)
     if callable(setup):
         started = time.perf_counter()
@@ -63,7 +72,6 @@ def initialize_task_store() -> None:
 
 
 async def _save(record: TaskRecord) -> None:
-    # psycopg 是同步驱动，放入线程池避免阻塞 Agent 事件循环。
     started = time.perf_counter()
     logger.info("analysis.task_store.save.start task_id=%s status=%s", record.task_id, record.status)
     await to_thread(_task_store.save, record)
@@ -105,7 +113,6 @@ def _compact_agent_output(output: dict) -> dict:
 
 
 async def _set_redis_status(task_id: str, status: str) -> None:
-    """Redis is coordination/cache only; persistence remains PostgreSQL."""
     try:
         await get_redis_task_coordinator().set_status(task_id, status)
     except Exception as exc:
@@ -118,50 +125,94 @@ async def _set_redis_status(task_id: str, status: str) -> None:
         )
 
 
-async def run_analysis(query: str) -> dict:
+async def _prepare_memory(session_id: str, user_id: str | None, query: str) -> tuple[str, str]:
+    if settings.environment == "test":
+        return query, str(uuid4())
+
+    await to_thread(_memory_store.ensure_session, session_id, user_id)
+    recent = await to_thread(_memory_store.recent_messages, session_id, 20)
+    summary = await to_thread(_memory_store.get_summary, session_id)
+    context = build_short_term_context(recent, summary=summary, limit=20)
+    rendered = render_short_term_context(context)
+    user_message_id = await to_thread(
+        _memory_store.append_message,
+        session_id,
+        "user",
+        query,
+        user_id=user_id,
+    )
+
+    if user_id:
+        memories = extract_explicit_memories(user_id, user_message_id, query)
+        for memory in memories:
+            await to_thread(_memory_store.upsert_long_term_memory, memory)
+
+    enriched_query = f"{rendered}\n\n[Current User Request]\n{query}" if rendered else query
+    return enriched_query, user_message_id
+
+
+def _assistant_content(response: dict) -> str:
+    report = response.get("report")
+    if report is None:
+        return ""
+    if isinstance(report, str):
+        return report
+    if hasattr(report, "model_dump"):
+        return json.dumps(report.model_dump(), ensure_ascii=False, default=str)
+    return json.dumps(report, ensure_ascii=False, default=str)
+
+
+async def run_analysis(query: str, *, session_id: str | None = None, user_id: str | None = None) -> dict:
     task_id = str(uuid4())
+    session_id = session_id or task_id
     request_started = time.perf_counter()
-    logger.info("analysis.start task_id=%s query_length=%d", task_id, len(query))
+    logger.info(
+        "analysis.start task_id=%s session_id=%s user_id=%s query_length=%d",
+        task_id,
+        session_id,
+        user_id or "-",
+        len(query),
+    )
     await _set_redis_status(task_id, "running")
     await _save(TaskRecord(task_id=task_id, status="running"))
     try:
+        memory_query, _ = await _prepare_memory(session_id, user_id, query)
         logger.info(
-            "analysis.workflow.prepare task_id=%s timeout_seconds=%.1f",
+            "analysis.memory.prepared task_id=%s session_id=%s context_length=%d",
             task_id,
-            GLOBAL_TIMEOUT_SECONDS,
+            session_id,
+            len(memory_query),
         )
         workflow = _get_workflow()
-        logger.info("analysis.workflow.ready task_id=%s", task_id)
-        logger.info("analysis.workflow.invoke.start task_id=%s", task_id)
         workflow_started = time.perf_counter()
         result = await run_with_timeout(
             workflow.ainvoke(
                 {
-                    "query": query,
+                    "query": memory_query,
                     "task_id": task_id,
                     "errors": [],
                     "traces": [],
                     "delegations": [],
                     "agent_outputs": [],
                 },
-                config={"configurable": {"thread_id": task_id}},
+                config={"configurable": {"thread_id": session_id}},
             ),
             timeout=GLOBAL_TIMEOUT_SECONDS,
         )
         logger.info(
-            "analysis.workflow.invoke.completed task_id=%s elapsed_ms=%.1f errors=%d traces=%d agent_outputs=%d",
+            "analysis.workflow.invoke.completed task_id=%s session_id=%s elapsed_ms=%.1f errors=%d traces=%d agent_outputs=%d",
             task_id,
+            session_id,
             (time.perf_counter() - workflow_started) * 1000,
             len(result.get("errors", [])),
             len(result.get("traces", [])),
             len(result.get("agent_outputs", [])),
         )
-        response_agent_outputs = [
-            _compact_agent_output(output)
-            for output in result.get("agent_outputs", [])
-        ]
+        response_agent_outputs = [_compact_agent_output(output) for output in result.get("agent_outputs", [])]
         response = {
             "task_id": task_id,
+            "session_id": session_id,
+            "user_id": user_id,
             "query": query,
             "status": result.get("status", "completed" if not result.get("errors") else "partial"),
             "report": result.get("report"),
@@ -170,49 +221,35 @@ async def run_analysis(query: str) -> dict:
             "delegations": result.get("delegations", []),
             "agent_outputs": response_agent_outputs,
         }
-        await _save(
-            TaskRecord(
-                task_id=task_id,
-                status=response["status"],
-                result=response,
-            )
-        )
+        if settings.environment != "test":
+            assistant_content = _assistant_content(response)
+            if assistant_content:
+                await to_thread(
+                    _memory_store.append_message,
+                    session_id,
+                    "assistant",
+                    assistant_content,
+                    user_id=user_id,
+                    metadata={"task_id": task_id, "status": response["status"]},
+                )
+        await _save(TaskRecord(task_id=task_id, status=response["status"], result=response))
         await _set_redis_status(task_id, response["status"])
         logger.info(
-            "analysis.completed task_id=%s status=%s total_elapsed_ms=%.1f",
+            "analysis.completed task_id=%s session_id=%s status=%s total_elapsed_ms=%.1f",
             task_id,
+            session_id,
             response["status"],
             (time.perf_counter() - request_started) * 1000,
         )
         return response
     except asyncio.TimeoutError:
-        logger.error(
-            "analysis.timeout task_id=%s timeout_seconds=%.1f total_elapsed_ms=%.1f",
-            task_id,
-            GLOBAL_TIMEOUT_SECONDS,
-            (time.perf_counter() - request_started) * 1000,
-        )
         await _set_redis_status(task_id, "failed")
-        await _save(
-            TaskRecord(
-                task_id=task_id,
-                status="failed",
-                error=f"analysis timeout after {GLOBAL_TIMEOUT_SECONDS:.1f}s",
-            )
-        )
-        raise HTTPException(
-            status_code=504,
-            detail=f"analysis timed out after {GLOBAL_TIMEOUT_SECONDS:.1f}s; task_id={task_id}",
-        )
+        await _save(TaskRecord(task_id=task_id, status="failed", error=f"analysis timeout after {GLOBAL_TIMEOUT_SECONDS:.1f}s"))
+        raise HTTPException(status_code=504, detail=f"analysis timed out after {GLOBAL_TIMEOUT_SECONDS:.1f}s; task_id={task_id}")
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception(
-            "analysis.failed task_id=%s total_elapsed_ms=%.1f error=%s",
-            task_id,
-            (time.perf_counter() - request_started) * 1000,
-            exc,
-        )
+        logger.exception("analysis.failed task_id=%s total_elapsed_ms=%.1f error=%s", task_id, (time.perf_counter() - request_started) * 1000, exc)
         await _set_redis_status(task_id, "failed")
         await _save(TaskRecord(task_id=task_id, status="failed", error=str(exc)))
         raise
@@ -220,7 +257,7 @@ async def run_analysis(query: str) -> dict:
 
 @router.post("/analyze")
 async def analyze(request: AnalyzeRequest) -> dict:
-    return await run_analysis(request.query)
+    return await run_analysis(request.query, session_id=request.session_id, user_id=request.user_id)
 
 
 @router.get("/tasks/{task_id}")
