@@ -69,6 +69,14 @@ async def _invoke(agent: Any, query: str, agent_id: str, task_id: str, parent_ag
 
     async def invoke_once():
         attempt_started = time.perf_counter()
+        logger.info(
+            "agent.invoke.input task_id=%s agent=%s parent=%s input_length=%d input=%s",
+            task_id,
+            agent_id,
+            parent_agent_id or "-",
+            len(query),
+            query,
+        )
         logger.info("agent.invoke.start task_id=%s agent=%s parent=%s input_length=%d agent_type=%s", task_id, agent_id, parent_agent_id or "-", len(query), type(agent).__name__)
         operation = asyncio.create_task(agent.ainvoke({"messages": [{"role": "user", "content": query}], "task_id": task_id}))
         progress_task = asyncio.create_task(_log_agent_progress(operation, task_id, agent_id, attempt_started))
@@ -150,6 +158,12 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
         result, trace = await _invoke(create_supervisor(), _plan_query(state["query"], state.get("aggregated_context")), "supervisor", task_id)
         plan = extract_execution_plan(result)
         logger.info("workflow.supervisor.plan.completed task_id=%s tasks=%d elapsed_ms=%.1f", task_id, len(plan.tasks), (time.perf_counter() - started) * 1000)
+        logger.info(
+            "workflow.supervisor.plan.input_output task_id=%s input_length=%d plan=%s",
+            task_id,
+            len(_plan_query(state["query"], state.get("aggregated_context"))),
+            json.dumps(plan.model_dump(), ensure_ascii=False, default=str),
+        )
         return {"execution_plan": plan.model_dump(), "supervisor_result": result, "traces": [trace], "delegations": [_delegation(task_id, task, "planned") for task in plan.tasks], "replan_count": state.get("replan_count", 0), "status": "planned"}
     except asyncio.CancelledError:
         raise
@@ -177,16 +191,42 @@ def _route_after_supervisor(state: AgentState) -> str:
 async def execute_plan_node(state: AgentState) -> dict[str, Any]:
     plan = ExecutionPlan.model_validate(state["execution_plan"])
     task_id = state["task_id"]
+    logger.info(
+        "workflow.execute_plan.input task_id=%s task_count=%d plan=%s",
+        task_id,
+        len(plan.tasks),
+        json.dumps(plan.model_dump(), ensure_ascii=False, default=str),
+    )
     results = await execute_with_dependencies(plan.tasks, lambda task: _execute_task(task, task_id), max_parallel=MAX_PARALLEL_AGENTS)
     outputs = [item[0] for item in results]
     delegations = [item[1] for item in results]
     traces = [trace for output in outputs for trace in output.get("traces", [])]
     errors = [error for output in outputs for error in output.get("errors", [])]
+    logger.info(
+        "workflow.execute_plan.output task_id=%s output_count=%d outputs=%s",
+        task_id,
+        len(outputs),
+        json.dumps(outputs, ensure_ascii=False, default=str),
+    )
     return {"agent_outputs": outputs, "delegations": delegations, "traces": traces, "errors": errors, "status": "partial" if errors else "executed"}
 
 
 async def aggregate_node(state: AgentState) -> dict[str, Any]:
-    context = aggregate_agent_outputs(state.get("agent_outputs", []))
+    task_id = state["task_id"]
+    agent_outputs = state.get("agent_outputs", [])
+    logger.info(
+        "workflow.aggregate.input task_id=%s output_count=%d outputs=%s",
+        task_id,
+        len(agent_outputs),
+        json.dumps(agent_outputs, ensure_ascii=False, default=str),
+    )
+    context = aggregate_agent_outputs(agent_outputs)
+    logger.info(
+        "workflow.aggregate.output task_id=%s context_length=%d context=%s",
+        task_id,
+        len(json.dumps(context, ensure_ascii=False, default=str)),
+        json.dumps(context, ensure_ascii=False, default=str),
+    )
     return {"aggregated_context": context}
 
 
