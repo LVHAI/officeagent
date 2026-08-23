@@ -22,9 +22,11 @@ You MUST call submit_execution_plan exactly once. Create the minimum plan that c
 answer the user's request.
 
 The submit_execution_plan function is the authoritative structured function-calling
-interface. Always provide every task as structured arguments. For optional fields,
-prefer omitting them rather than emitting null. Never invent database fields, product
-names, or facts not present in the user request or available context.
+interface. Use ONLY these agent values: knowledge-agent, tool-agent, web-agent.
+NEVER emit general-purpose, general-purpose-agent, knowledge, tool, web, or any other
+agent name. For optional fields, prefer omitting them rather than emitting null.
+Never invent database fields, product names, or facts not present in the user request
+or available context.
 
 Routing rules:
 - Internal knowledge, manuals, policies, FAQs, recipes, product documentation and
@@ -47,12 +49,7 @@ Routing rules:
 def submit_execution_plan(
     tasks: list[dict[str, Any]], rationale: str = ""
 ) -> str:
-    """Function-calling entry point.
-
-    StructuredTool supplies validated keyword arguments from the model's function call,
-    so this callable deliberately keeps the concrete keyword signature. The explicit
-    Pydantic schema is attached to PLAN_TOOL for the model-facing contract.
-    """
+    """Function-calling entry point with a concrete keyword signature."""
     payload = ExecutionPlanInput(tasks=tasks, rationale=rationale)
     normalized = payload.to_execution_plan()
     return normalized.model_dump_json()
@@ -63,9 +60,8 @@ PLAN_TOOL = StructuredTool.from_function(
     name="submit_execution_plan",
     description=(
         "Submit exactly one validated execution plan. The arguments are structured as "
-        "tasks plus optional rationale. Each task contains task_id, agent, query, "
-        "optional depends_on, parallel_group, and constraints. Omit optional fields "
-        "when they are not needed."
+        "tasks plus optional rationale. Each task MUST use one of knowledge-agent, "
+        "tool-agent, or web-agent."
     ),
     args_schema=ExecutionPlanInput,
 )
@@ -85,7 +81,6 @@ class _PlannerAgent:
 
 
 def create_execution_planner() -> _PlannerAgent:
-    """Create a fresh planner instance for one workflow invocation."""
     logger.info("agent.create supervisor-planner model=deepagent")
     return _PlannerAgent()
 
@@ -104,7 +99,6 @@ def _tool_call_args(call: Any) -> dict[str, Any]:
 
 
 def _tool_message_plan(message: Any) -> dict[str, Any] | None:
-    """Extract the JSON returned by the executed submit_execution_plan tool."""
     name = _message_value(message, "name") or _message_value(message, "tool_name")
     if name != "submit_execution_plan":
         return None
@@ -120,8 +114,40 @@ def _tool_message_plan(message: Any) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_agent_alias(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return {
+        "knowledge": "knowledge-agent",
+        "knowledge_agent": "knowledge-agent",
+        "tool": "tool-agent",
+        "tool_agent": "tool-agent",
+        "general-purpose": "tool-agent",
+        "general_purpose": "tool-agent",
+        "general-purpose-agent": "tool-agent",
+        "web": "web-agent",
+        "web_agent": "web-agent",
+    }.get(value, value)
+
+
+def _normalize_tool_call(value: dict[str, Any]) -> dict[str, Any]:
+    """Normalize known LLM aliases before strict ExecutionPlan validation."""
+    normalized = dict(value)
+    tasks = normalized.get("tasks")
+    if isinstance(tasks, list):
+        normalized["tasks"] = [
+            {
+                **task,
+                "agent": _normalize_agent_alias(task.get("agent")),
+            }
+            if isinstance(task, dict) else task
+            for task in tasks
+        ]
+    return normalized
+
+
 def _normalize_plan(value: dict[str, Any]) -> ExecutionPlan:
-    return ExecutionPlan.model_validate(value)
+    return ExecutionPlan.model_validate(_normalize_tool_call(value))
 
 
 def extract_execution_plan(result: Any) -> ExecutionPlan:
