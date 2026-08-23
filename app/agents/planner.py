@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -74,50 +75,79 @@ def create_execution_planner() -> _PlannerAgent:
     return _PlannerAgent()
 
 
+def _message_value(message: Any, key: str, default: Any = None) -> Any:
+    if isinstance(message, dict):
+        return message.get(key, default)
+    return getattr(message, key, default)
+
+
 def _tool_call_args(call: Any) -> dict[str, Any]:
-    if isinstance(call, dict):
-        args = call.get("args", {})
-    else:
-        args = getattr(call, "args", {})
+    args = _message_value(call, "args", {})
     if not isinstance(args, dict):
         raise ValueError("submit_execution_plan arguments must be an object")
     return args
 
 
-def extract_execution_plan(result: Any) -> ExecutionPlan:
-    """Extract the submitted plan while tolerating an idempotent duplicate tool call.
+def _tool_message_plan(message: Any) -> dict[str, Any] | None:
+    """Extract the JSON returned by the executed submit_execution_plan tool."""
+    name = _message_value(message, "name") or _message_value(message, "tool_name")
+    if name != "submit_execution_plan":
+        return None
 
-    Some model/tool runtimes can emit the same structured tool call more than once.
-    Requiring a raw call count of exactly one makes an otherwise valid plan fail.
-    Identical calls are therefore treated as one submission; genuinely different
-    plans remain an error because silently choosing between them would be unsafe.
+    content = _message_value(message, "content")
+    if isinstance(content, dict):
+        return content
+    if isinstance(content, str):
+        try:
+            value = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        return value if isinstance(value, dict) else None
+    return None
+
+
+def extract_execution_plan(result: Any) -> ExecutionPlan:
+    """Extract the validated plan from DeepAgents/LangChain tool-call messages.
+
+    A StructuredTool has two observable message forms: the AI message containing
+    ``tool_calls`` before execution, and the ToolMessage containing the tool's return
+    value after execution. DeepAgents normally returns the latter as part of the
+    completed message history, so looking only at AI.tool_calls can incorrectly report
+    zero calls. We inspect both forms and deduplicate an identical plan if a runtime
+    exposes both representations.
     """
     messages = result.get("messages", []) if isinstance(result, dict) else []
-    calls: list[Any] = []
+    submitted: list[dict[str, Any]] = []
+
     for message in messages:
         if isinstance(message, dict):
             tool_calls = message.get("tool_calls", [])
         else:
             tool_calls = getattr(message, "tool_calls", [])
         for call in tool_calls or []:
-            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+            name = _message_value(call, "name")
             if name == "submit_execution_plan":
-                calls.append(call)
+                submitted.append(_tool_call_args(call))
 
-    if not calls:
-        raise ValueError("Supervisor must call submit_execution_plan exactly once; got 0")
+        tool_plan = _tool_message_plan(message)
+        if tool_plan is not None:
+            submitted.append(tool_plan)
 
-    args = [_tool_call_args(call) for call in calls]
-    first = args[0]
-    if any(candidate != first for candidate in args[1:]):
+    if not submitted:
+        raise ValueError(
+            "Supervisor must call submit_execution_plan exactly once; no submitted plan was found"
+        )
+
+    first = submitted[0]
+    if any(candidate != first for candidate in submitted[1:]):
         raise ValueError(
             "Supervisor submitted multiple different execution plans; refusing to choose silently"
         )
 
-    if len(calls) > 1:
+    if len(submitted) > 1:
         logger.warning(
             "supervisor.plan.duplicate_tool_calls count=%d action=deduplicated",
-            len(calls),
+            len(submitted),
         )
 
     return ExecutionPlan.model_validate(first)
