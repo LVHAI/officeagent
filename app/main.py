@@ -13,7 +13,6 @@ from app.api.analysis import router as analysis_router
 from app.api.auth import router as auth_router
 from app.api.conversations import router as conversations_router
 from app.api.conversations import configure_memory_store
-from app.core.auth import setup_auth_store
 from app.core.checkpoint import close_checkpointer, initialize_checkpointer
 from app.core.config import settings
 from app.core.health import dependency_status
@@ -35,8 +34,6 @@ async def lifespan(_app: FastAPI):
     initialize_task_store()
     logger.info("application.task_store.initialized")
     if settings.environment != "test":
-        setup_auth_store()
-        logger.info("application.auth_store.initialized")
         memory_store = PostgresMemoryStore()
         memory_store.setup()
         configure_memory_store(memory_store)
