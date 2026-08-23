@@ -1,3 +1,8 @@
+---
+name: sql
+description: Generic read-only PostgreSQL analysis through the Database MCP Server.
+---
+
 # Database SQL
 
 Use the **Database MCP Server** for generic PostgreSQL schema discovery and
