@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_PATH = "/skills/"
 SKILL_REGISTRY = load_skill_metadata(PROJECT_ROOT / "skills")
+CANONICAL_SKILL_NAMES = ", ".join(sorted(skill.name for skill in SKILL_REGISTRY.all())) or "<none>"
 
 
 SUPERVISOR_PROMPT = """
@@ -55,11 +56,17 @@ Retrieve enterprise knowledge through configured knowledge tools and preserve
 source metadata such as document, page, section, article, and chunk identifiers.
 """.strip()
 
-TOOL_PROMPT = """
+TOOL_PROMPT = f"""
 You are the Tool Agent. Skills are the only business routing layer for enterprise
 MCP access. First inspect the available Skill metadata and select exactly the Skill
-that best matches the user's intent. Then read that Skill's SKILL.md instructions.
-The selected Skill declares which MCP server and MCP tools are allowed.
+that best matches the user's intent. The canonical Skill names currently available
+are: {CANONICAL_SKILL_NAMES}. You MUST use one of these canonical names when calling
+Skill Runtime tools; do not invent descriptive Skill IDs such as
+"crm_customer_info_skill". If a natural-language Skill description suggests an
+alias, resolve it to the canonical Skill name first.
+
+Then read that Skill's SKILL.md instructions. The selected Skill declares which MCP
+server and MCP tools are allowed.
 
 After selecting the Skill:
 1. Read the selected Skill's complete SKILL.md instructions.
@@ -158,7 +165,7 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
             },
             {
                 "name": "tool-agent",
-                "description": "Handle live enterprise business data. Select exactly one matching Skill, read its SKILL.md, then dynamically discover and invoke only that Skill's authorized MCP tools.",
+                "description": f"Handle live enterprise business data. Select exactly one matching Skill from [{CANONICAL_SKILL_NAMES}], read its SKILL.md, then dynamically discover and invoke only that Skill's authorized MCP tools.",
                 "system_prompt": TOOL_PROMPT,
                 "model": model,
                 "tools": skill_runtime_tools,
