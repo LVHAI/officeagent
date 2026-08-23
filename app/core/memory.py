@@ -54,6 +54,15 @@ def render_short_term_context(context: ShortTermContext) -> str:
     return "\n\n".join(parts)
 
 
+def render_long_term_memories(memories: list[LongTermMemory]) -> str:
+    if not memories:
+        return ""
+    lines = ["[Long-term User Memory]"]
+    for memory in memories:
+        lines.append(f"{memory.memory_type}.{memory.key}: {memory.value}")
+    return "\n".join(lines)
+
+
 def extract_explicit_memories(user_id: str, message_id: str, content: str) -> list[dict[str, Any]]:
     """Extract only explicit, high-confidence user preferences/facts.
 
