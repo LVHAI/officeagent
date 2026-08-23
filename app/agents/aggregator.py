@@ -5,8 +5,11 @@ from typing import Any
 
 from app.agents.contracts import Source
 
-REPORT_RESULT_MAX_CHARS = 6000
-REPORT_SOURCE_CONTENT_MAX_CHARS = 1000
+# Report context is deliberately much smaller than the raw AgentOutput. The full
+# output remains in LangGraph state for trace/audit; only concise evidence crosses
+# the Report Agent boundary.
+REPORT_RESULT_MAX_CHARS = 2500
+REPORT_SOURCE_CONTENT_MAX_CHARS = 600
 
 
 def _source_key(source: Any) -> tuple[str, str, str]:
@@ -49,13 +52,16 @@ def _message_content(message: Any) -> str | None:
 
 
 def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS) -> Any:
-    """Remove agent execution envelopes before shared synthesis context is built."""
+    """Keep concise final evidence and never forward raw agent message history."""
     if isinstance(result, dict):
         messages = result.get("messages")
         if isinstance(messages, list):
+            # Agent/tool traces can contain many large intermediate messages. The
+            # downstream Report Agent needs the final evidence, not the full loop.
             contents = [_message_content(message) for message in messages]
             contents = [content for content in contents if content]
-            return {"final_evidence": _truncate_text("\n\n".join(contents), limit)}
+            final_evidence = contents[-1] if contents else ""
+            return {"final_evidence": _truncate_text(final_evidence, limit)}
 
         encoded = json.dumps(result, ensure_ascii=False, default=str)
         return _truncate_text(encoded, limit)
