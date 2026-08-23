@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class MCPToolRegistry:
-    """Discover MCP tools once at startup and expose safe LangChain wrappers."""
+    """Own MCP clients and keep concrete enterprise tool schemas out of Agent context."""
 
     def __init__(self) -> None:
         self._clients: dict[str, MCPClient] = {}
@@ -33,6 +33,14 @@ class MCPToolRegistry:
         for service, url in services.items():
             client = MCPClient(_HttpTransport(url))
             self._clients[service] = client
+
+            # Knowledge tools are deterministic infrastructure used directly by the
+            # Knowledge Agent. Enterprise business tools remain undiscovered until
+            # a selected Skill explicitly requests dynamic discovery.
+            if service != "knowledge":
+                logger.info("mcp.client.ready service=%s dynamic_discovery=true", service)
+                continue
+
             started = time.perf_counter()
             logger.info("mcp.discovery.start service=%s url=%s", service, url)
             try:
@@ -53,6 +61,33 @@ class MCPToolRegistry:
                     (time.perf_counter() - started) * 1000,
                 )
 
+    def get_client(self, service: str) -> MCPClient:
+        try:
+            return self._clients[service]
+        except KeyError as exc:
+            raise KeyError(f"Unknown or uninitialized MCP service: {service}") from exc
+
+    async def discover_skill_tools(self, service: str, allowed_tools: tuple[str, ...]) -> list[MCPTool]:
+        """Discover only the MCP schema required by a selected Skill."""
+        client = self.get_client(service)
+        started = time.perf_counter()
+        logger.info(
+            "mcp.skill.discovery.start service=%s allowed_tools=%s",
+            service,
+            list(allowed_tools),
+        )
+        definitions = await client.discover_tools()
+        allowed = set(allowed_tools)
+        selected = [definition for definition in definitions if definition.name in allowed]
+        logger.info(
+            "mcp.skill.discovery.completed service=%s discovered=%d selected=%d elapsed_ms=%.1f",
+            service,
+            len(definitions),
+            len(selected),
+            (time.perf_counter() - started) * 1000,
+        )
+        return selected
+
     def tools(self, *services: str) -> list[StructuredTool]:
         selected = services or tuple(self._tools)
         return [tool for service in selected for tool in self._tools.get(service, [])]
@@ -70,7 +105,7 @@ class MCPToolRegistry:
 class _HttpTransport:
     """MCPTransport adapter that opens a short-lived Streamable HTTP session per call."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str):
         self.url = url
 
     async def list_tools(self) -> Any:
@@ -115,11 +150,7 @@ def _log_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> None:
         )
         return
 
-    logger.info(
-        "mcp.sql.query tool=%s sql=%s",
-        tool_name,
-        str(sql).strip(),
-    )
+    logger.info("mcp.sql.query tool=%s sql=%s", tool_name, str(sql).strip())
 
 
 def build_langchain_tools(client: MCPClient, definitions: list[MCPTool]) -> list[StructuredTool]:
