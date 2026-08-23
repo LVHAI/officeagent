@@ -43,6 +43,51 @@ def test_deepagent_uses_project_skills_for_tool_agent(monkeypatch):
     assert captured["backend"] is not None
 
 
+def test_tool_agent_filters_direct_crm_tools():
+    import app.agents.deepagents as deepagents_module
+
+    class DummyTool:
+        def __init__(self, name):
+            self.name = name
+
+    tools = [
+        DummyTool("customer_query"),
+        DummyTool("customer_search"),
+        DummyTool("sql_query"),
+        DummyTool("report_generate"),
+    ]
+
+    selected = deepagents_module._filter_tool_agent_tools(tools)
+
+    assert [tool.name for tool in selected] == ["sql_query", "report_generate"]
+
+
+def test_deepagent_never_exposes_direct_crm_tool_to_tool_agent(monkeypatch):
+    import app.agents.deepagents as deepagents_module
+
+    captured = {}
+
+    monkeypatch.setattr(deepagents_module, "build_chat_model", lambda: object())
+    monkeypatch.setattr(deepagents_module, "build_tavily_search", lambda: None)
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(deepagents_module, "create_deep_agent", fake_create_deep_agent)
+
+    class DummyTool:
+        def __init__(self, name):
+            self.name = name
+
+    deepagents_module.create_supervisor(
+        tool_tools=[DummyTool("customer_query"), DummyTool("sql_query")]
+    )
+
+    tool_agent = next(item for item in captured["subagents"] if item["name"] == "tool-agent")
+    assert [tool.name for tool in tool_agent["tools"]] == ["sql_query"]
+
+
 def test_project_skills_have_deepagent_frontmatter():
     from pathlib import Path
 
