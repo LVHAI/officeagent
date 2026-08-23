@@ -1,3 +1,5 @@
+import json
+
 from app.agents.planner import create_execution_planner, extract_execution_plan
 
 
@@ -26,6 +28,57 @@ def test_extract_execution_plan_from_structured_tool_call():
         ]
     }
     plan = extract_execution_plan(result)
+    assert plan.tasks[0].agent == "knowledge-agent"
+
+
+def test_extract_execution_plan_from_executed_tool_message():
+    payload = {
+        "tasks": [
+            {"task_id": "w", "agent": "web-agent", "query": "查最新市场信息"}
+        ],
+        "rationale": "需要当前外部信息",
+    }
+    result = {
+        "messages": [
+            {
+                "type": "tool",
+                "name": "submit_execution_plan",
+                "content": json.dumps(payload),
+                "tool_call_id": "call-1",
+            }
+        ]
+    }
+
+    plan = extract_execution_plan(result)
+
+    assert plan.tasks[0].agent == "web-agent"
+    assert plan.rationale == "需要当前外部信息"
+
+
+def test_extract_execution_plan_deduplicates_ai_and_tool_message():
+    call = {
+        "name": "submit_execution_plan",
+        "args": {
+            "tasks": [
+                {"task_id": "k", "agent": "knowledge-agent", "query": "查制度"}
+            ]
+        },
+    }
+    result = {
+        "messages": [
+            {"type": "ai", "tool_calls": [call]},
+            {
+                "type": "tool",
+                "name": "submit_execution_plan",
+                "content": json.dumps(call["args"]),
+                "tool_call_id": "call-1",
+            },
+        ]
+    }
+
+    plan = extract_execution_plan(result)
+
+    assert len(plan.tasks) == 1
     assert plan.tasks[0].agent == "knowledge-agent"
 
 
