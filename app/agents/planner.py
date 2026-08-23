@@ -106,18 +106,22 @@ def _tool_message_plan(message: Any) -> dict[str, Any] | None:
     return None
 
 
+def _normalize_plan(value: dict[str, Any]) -> ExecutionPlan:
+    """Validate and canonicalize a plan before comparing representations."""
+    return ExecutionPlan.model_validate(value)
+
+
 def extract_execution_plan(result: Any) -> ExecutionPlan:
     """Extract the validated plan from DeepAgents/LangChain tool-call messages.
 
-    A StructuredTool has two observable message forms: the AI message containing
-    ``tool_calls`` before execution, and the ToolMessage containing the tool's return
-    value after execution. DeepAgents normally returns the latter as part of the
-    completed message history, so looking only at AI.tool_calls can incorrectly report
-    zero calls. We inspect both forms and deduplicate an identical plan if a runtime
-    exposes both representations.
+    LangGraph/DeepAgents can expose the same StructuredTool execution through both
+    the AI tool-call message and the resulting ToolMessage. Those two representations
+    are not necessarily byte-for-byte identical: omitted Pydantic defaults may appear
+    in the executed tool result. Compare canonical ExecutionPlan models instead of
+    raw dictionaries, so representation differences are not mistaken for two plans.
     """
     messages = result.get("messages", []) if isinstance(result, dict) else []
-    submitted: list[dict[str, Any]] = []
+    submitted: list[ExecutionPlan] = []
 
     for message in messages:
         if isinstance(message, dict):
@@ -127,11 +131,11 @@ def extract_execution_plan(result: Any) -> ExecutionPlan:
         for call in tool_calls or []:
             name = _message_value(call, "name")
             if name == "submit_execution_plan":
-                submitted.append(_tool_call_args(call))
+                submitted.append(_normalize_plan(_tool_call_args(call)))
 
         tool_plan = _tool_message_plan(message)
         if tool_plan is not None:
-            submitted.append(tool_plan)
+            submitted.append(_normalize_plan(tool_plan))
 
     if not submitted:
         raise ValueError(
@@ -139,15 +143,21 @@ def extract_execution_plan(result: Any) -> ExecutionPlan:
         )
 
     first = submitted[0]
-    if any(candidate != first for candidate in submitted[1:]):
+    canonical = first.model_dump(mode="json")
+    if any(plan.model_dump(mode="json") != canonical for plan in submitted[1:]):
+        logger.error(
+            "supervisor.plan.conflict count=%d plans=%s",
+            len(submitted),
+            [plan.model_dump(mode="json") for plan in submitted],
+        )
         raise ValueError(
             "Supervisor submitted multiple different execution plans; refusing to choose silently"
         )
 
     if len(submitted) > 1:
-        logger.warning(
-            "supervisor.plan.duplicate_tool_calls count=%d action=deduplicated",
+        logger.info(
+            "supervisor.plan.duplicate_representations count=%d action=deduplicated",
             len(submitted),
         )
 
-    return ExecutionPlan.model_validate(first)
+    return first
