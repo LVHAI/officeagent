@@ -111,23 +111,77 @@ async def _invoke(agent, query: str, agent_id: str, task_id: str, parent_agent_i
         await asyncio.gather(progress_task, return_exceptions=True)
 
 
-def _delegation(task_id: str, child: str, status: str, elapsed_ms: float = 0.0, error: str | None = None):
+def _delegation(
+    task_id: str,
+    child: str,
+    status: str,
+    *,
+    reason: str = "",
+    elapsed_ms: float = 0.0,
+    error: str | None = None,
+):
     return DelegationTrace(
         task_id=task_id,
         delegation_id=str(uuid4()),
         parent_agent_id="supervisor",
         child_agent_id=child,
         status=status,
+        reason=reason,
         elapsed_ms=elapsed_ms,
         error=error,
     ).__dict__
 
 
 def _supervisor_tools() -> dict[str, list[Any]]:
-    return {
-        "knowledge": mcp_registry.tools("knowledge"),
-        "tool": mcp_registry.tools("crm", "database", "report"),
-    }
+    """Expose only deterministic knowledge tools to the Supervisor runtime.
+
+    Enterprise MCP tools belong behind Tool Agent -> Skill Runtime -> MCP. They must
+    not be registered directly on the Supervisor, otherwise the context grows with
+    the enterprise tool catalog and bypasses the Skill boundary.
+    """
+    return {"knowledge": mcp_registry.tools("knowledge")}
+
+
+def _message_value(message: Any, key: str, default: Any = None) -> Any:
+    if isinstance(message, dict):
+        return message.get(key, default)
+    return getattr(message, key, default)
+
+
+def _extract_delegations(result: Any, task_id: str) -> list[dict[str, Any]]:
+    """Build delegation traces only from actual DeepAgents `task` tool calls.
+
+    The previous implementation searched the Supervisor's final natural-language
+    response for agent names. That could report a delegation even when no subagent
+    was called. DeepAgents exposes subagent execution through the `task` tool, so the
+    trace must be derived from those tool-call records instead.
+
+    The event is deliberately marked `delegated`, not `completed`: the current graph
+    boundary observes the Supervisor's tool-call history but does not yet receive a
+    child-agent lifecycle callback with an accurate duration. A future execution
+    event stream can upgrade this to completed/failed without changing the contract.
+    """
+    messages = result.get("messages", []) if isinstance(result, dict) else getattr(result, "messages", [])
+    delegations: list[dict[str, Any]] = []
+    for message in messages or []:
+        tool_calls = _message_value(message, "tool_calls", []) or []
+        for call in tool_calls:
+            if not isinstance(call, dict) or call.get("name") != "task":
+                continue
+            args = call.get("args") or {}
+            child = args.get("subagent_type")
+            if not child:
+                continue
+            reason = str(args.get("description", "")).strip()
+            delegations.append(
+                _delegation(
+                    task_id,
+                    child,
+                    "delegated",
+                    reason=reason,
+                )
+            )
+    return delegations
 
 
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
@@ -137,27 +191,24 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     try:
         tools = _supervisor_tools()
         logger.info(
-            "workflow.supervisor.tools task_id=%s knowledge=%d enterprise=%d",
+            "workflow.supervisor.tools task_id=%s knowledge=%d enterprise=skill_runtime",
             task_id,
             len(tools["knowledge"]),
-            len(tools["tool"]),
         )
         result, trace = await _invoke(
-            create_supervisor(
-                knowledge_tools=tools["knowledge"],
-                tool_tools=tools["tool"],
-            ),
+            create_supervisor(knowledge_tools=tools["knowledge"]),
             state["query"],
             "supervisor",
             task_id,
         )
         elapsed = (asyncio.get_running_loop().time() - started) * 1000
-        delegations = [
-            _delegation(task_id, name, "completed", elapsed_ms=elapsed)
-            for name in ("knowledge-agent", "tool-agent", "web-agent")
-            if name.replace("-agent", "") in str(result).lower()
-        ]
-        logger.info("workflow.supervisor.completed task_id=%s elapsed_ms=%.1f delegations=%d", task_id, elapsed, len(delegations))
+        delegations = _extract_delegations(result, task_id)
+        logger.info(
+            "workflow.supervisor.completed task_id=%s elapsed_ms=%.1f delegations=%d",
+            task_id,
+            elapsed,
+            len(delegations),
+        )
         return {"supervisor_result": result, "traces": [trace], "delegations": delegations}
     except asyncio.CancelledError:
         logger.warning("workflow.supervisor.cancelled task_id=%s", task_id)
