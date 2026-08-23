@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 
 from app.core.memory_store import PostgresMemoryStore
 
@@ -13,14 +13,22 @@ def configure_memory_store(store: PostgresMemoryStore) -> None:
     _store = store
 
 
+@router.get("/conversations")
+def list_conversations(
+    user_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    return {"conversations": _store.list_sessions(user_id=user_id, limit=limit, offset=offset), "limit": limit, "offset": offset}
+
+
 @router.get("/conversations/{session_id}/messages")
 def get_conversation_messages(
     session_id: str,
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
-    messages = _store.list_messages(session_id, limit=limit, offset=offset)
-    return {"session_id": session_id, "messages": messages, "limit": limit, "offset": offset}
+    return {"session_id": session_id, "messages": _store.list_messages(session_id, limit=limit, offset=offset), "limit": limit, "offset": offset}
 
 
 @router.get("/users/{user_id}/memories")
