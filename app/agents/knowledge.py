@@ -114,13 +114,17 @@ async def knowledge_search(query: str, limit: int = 5) -> str:
     sources = []
     for result in results:
         source = result.chunk.source
+        metadata = result.chunk.metadata
         sources.append(
             {
                 "chunk_id": result.chunk.id,
-                "document": source.document if source else result.chunk.metadata.get("document"),
-                "page": source.page if source else None,
-                "section": source.section if source else None,
-                "article": source.article if source else None,
+                "document": source.document if source else metadata.get("document"),
+                "document_id": metadata.get("document_id") or metadata.get("document"),
+                "page": source.page if source else metadata.get("page"),
+                "section": source.section if source else metadata.get("section"),
+                "article": source.article if source else metadata.get("article"),
+                "parent_id": metadata.get("parent_id"),
+                "chunk_type": metadata.get("chunk_type"),
                 "score": result.score,
                 "route": result.route,
             }
