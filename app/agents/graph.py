@@ -126,6 +126,41 @@ def _runtime_for(agent: str):
     return {"knowledge-agent": create_knowledge_agent, "tool-agent": create_tool_agent, "web-agent": create_web_agent}[agent]
 
 
+def _result_log_summary(output: dict[str, Any]) -> dict[str, Any]:
+    """Return a compact execution summary without logging internal message history."""
+    result = output.get("result")
+    summary: dict[str, Any] = {
+        "agent_id": output.get("agent_id"),
+        "status": output.get("status"),
+        "result_type": type(result).__name__,
+        "error_count": len(output.get("errors", []) or []),
+        "source_count": len(output.get("sources", []) or []),
+    }
+    if isinstance(result, dict):
+        messages = result.get("messages")
+        if isinstance(messages, list):
+            summary["message_count"] = len(messages)
+        final_evidence = result.get("final_evidence")
+        if final_evidence is not None:
+            summary["final_evidence_length"] = len(str(final_evidence))
+    elif result is not None:
+        final_evidence = getattr(result, "final_evidence", None)
+        if final_evidence is not None:
+            summary["final_evidence_length"] = len(str(final_evidence))
+    return summary
+
+
+def _aggregate_log_summary(output: dict[str, Any]) -> dict[str, Any]:
+    """Return only fields useful for debugging aggregation, not internal messages."""
+    result = output.get("result")
+    summary = _result_log_summary(output)
+    if isinstance(result, dict):
+        final_evidence = result.get("final_evidence")
+        if final_evidence is not None:
+            summary["final_evidence"] = str(final_evidence)
+    return summary
+
+
 async def _execute_task(task: ExecutionTask, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
     started = time.perf_counter()
     dependency_results = task.constraints.get("dependency_results")
@@ -206,7 +241,7 @@ async def execute_plan_node(state: AgentState) -> dict[str, Any]:
         "workflow.execute_plan.output task_id=%s output_count=%d outputs=%s",
         task_id,
         len(outputs),
-        json.dumps(outputs, ensure_ascii=False, default=str),
+        json.dumps([_result_log_summary(output) for output in outputs], ensure_ascii=False, default=str),
     )
     return {"agent_outputs": outputs, "delegations": delegations, "traces": traces, "errors": errors, "status": "partial" if errors else "executed"}
 
@@ -218,7 +253,7 @@ async def aggregate_node(state: AgentState) -> dict[str, Any]:
         "workflow.aggregate.input task_id=%s output_count=%d outputs=%s",
         task_id,
         len(agent_outputs),
-        json.dumps(agent_outputs, ensure_ascii=False, default=str),
+        json.dumps([_aggregate_log_summary(output) for output in agent_outputs], ensure_ascii=False, default=str),
     )
     context = aggregate_agent_outputs(agent_outputs)
     logger.info(
