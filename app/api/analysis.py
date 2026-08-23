@@ -95,17 +95,25 @@ async def run_analysis(query: str) -> dict:
         workflow_started = time.perf_counter()
         result = await run_with_timeout(
             workflow.ainvoke(
-                {"query": query, "task_id": task_id, "errors": [], "traces": [], "delegations": []},
+                {
+                    "query": query,
+                    "task_id": task_id,
+                    "errors": [],
+                    "traces": [],
+                    "delegations": [],
+                    "agent_outputs": [],
+                },
                 config={"configurable": {"thread_id": task_id}},
             ),
             timeout=GLOBAL_TIMEOUT_SECONDS,
         )
         logger.info(
-            "analysis.workflow.invoke.completed task_id=%s elapsed_ms=%.1f errors=%d traces=%d",
+            "analysis.workflow.invoke.completed task_id=%s elapsed_ms=%.1f errors=%d traces=%d agent_outputs=%d",
             task_id,
             (time.perf_counter() - workflow_started) * 1000,
             len(result.get("errors", [])),
             len(result.get("traces", [])),
+            len(result.get("agent_outputs", [])),
         )
         response = {
             "task_id": task_id,
@@ -115,6 +123,7 @@ async def run_analysis(query: str) -> dict:
             "errors": result.get("errors", []),
             "traces": result.get("traces", []),
             "delegations": result.get("delegations", []),
+            "agent_outputs": result.get("agent_outputs", []),
         }
         await _save(
             TaskRecord(
