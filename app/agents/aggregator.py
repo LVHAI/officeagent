@@ -6,6 +6,7 @@ from typing import Any
 from app.agents.contracts import Source
 
 REPORT_RESULT_MAX_CHARS = 6000
+REPORT_SOURCE_CONTENT_MAX_CHARS = 1000
 
 
 def _source_key(source: Any) -> tuple[str, str, str]:
@@ -31,10 +32,10 @@ def _json_value(value: Any) -> Any:
         return None
 
 
-def _truncate_text(value: str, limit: int = REPORT_RESULT_MAX_CHARS) -> str:
+def _truncate_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
-    return f"{value[:limit]}\n...[truncated for report context]"
+    return f"{value[:limit]}\n...[truncated]"
 
 
 def _message_content(message: Any) -> str | None:
@@ -48,20 +49,13 @@ def _message_content(message: Any) -> str | None:
 
 
 def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS) -> Any:
-    """Remove agent execution envelopes before the result enters shared workflow context.
-
-    Full AgentOutput remains in ``agent_outputs`` for tracing/audit. Aggregated context
-    is deliberately evidence-focused so Report Agent and replan prompts do not receive
-    LangGraph message history, tool-call envelopes, or intermediate execution metadata.
-    """
+    """Remove agent execution envelopes before shared synthesis context is built."""
     if isinstance(result, dict):
         messages = result.get("messages")
         if isinstance(messages, list):
             contents = [_message_content(message) for message in messages]
             contents = [content for content in contents if content]
-            return {
-                "final_evidence": _truncate_text("\n\n".join(contents), limit)
-            } if contents else {"final_evidence": ""}
+            return {"final_evidence": _truncate_text("\n\n".join(contents), limit)}
 
         encoded = json.dumps(result, ensure_ascii=False, default=str)
         return _truncate_text(encoded, limit)
@@ -76,16 +70,35 @@ def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS)
     return result
 
 
+def _compact_source(source: Any) -> dict[str, Any]:
+    if isinstance(source, Source):
+        kind = source.kind
+        title = source.title
+        uri = source.uri
+        metadata = dict(source.metadata)
+    elif isinstance(source, dict):
+        kind = str(source.get("kind", "unknown"))
+        title = str(source.get("title", ""))
+        uri = str(source.get("uri", ""))
+        metadata = dict(source.get("metadata", {}))
+    else:
+        kind = str(getattr(source, "kind", "unknown"))
+        title = str(getattr(source, "title", ""))
+        uri = str(getattr(source, "uri", ""))
+        metadata = dict(getattr(source, "metadata", {}) or {})
+
+    if "content" in metadata:
+        metadata["content"] = _truncate_text(str(metadata["content"]), REPORT_SOURCE_CONTENT_MAX_CHARS)
+    return {"kind": kind, "title": title, "uri": uri, "metadata": metadata}
+
+
 def _compact_output(output: dict[str, Any]) -> dict[str, Any]:
     """Keep only the Agent Contract fields required by downstream synthesis."""
     return {
         "agent_id": output.get("agent_id"),
         "status": output.get("status"),
         "result": compact_result_for_report(output.get("result")),
-        "sources": [
-            source.__dict__ if isinstance(source, Source) else source
-            for source in output.get("sources", [])
-        ],
+        "sources": [_compact_source(source) for source in output.get("sources", [])],
         "errors": output.get("errors", []),
     }
 
@@ -122,7 +135,12 @@ def extract_sources(result: Any) -> list[Source]:
                                 kind="web",
                                 title=str(raw.get("title") or ""),
                                 uri=str(raw.get("url") or raw.get("href") or ""),
-                                metadata={"content": raw.get("content", "")},
+                                metadata={
+                                    "content": _truncate_text(
+                                        str(raw.get("content", "")),
+                                        REPORT_SOURCE_CONTENT_MAX_CHARS,
+                                    )
+                                },
                             )
                         )
                     else:
@@ -182,6 +200,6 @@ def aggregate_agent_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
         "successful_results": successful,
         "partial_results": partial,
         "failed_results": failed,
-        "sources": [source.__dict__ for source in sources],
+        "sources": [_compact_source(source) for source in sources],
         "has_partial_result": bool(failed),
     }
