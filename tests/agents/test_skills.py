@@ -83,6 +83,93 @@ def test_runtime_tool_schema_only_allows_registered_skill_and_mcp_names():
     assert "get_customer_purchases" not in invoke_schema["properties"]["tool_name"]["enum"]
 
 
+@pytest.mark.asyncio
+async def test_runtime_discovers_once_and_reuses_definition_for_invoke():
+    class FakeClient:
+        def __init__(self):
+            self.discover_calls = 0
+            self.call_args = []
+
+        async def discover_tools(self):
+            self.discover_calls += 1
+            return [MCPTool("sql_query", "执行 SQL", {"type": "object"})]
+
+        async def call(self, name, arguments):
+            self.call_args.append((name, arguments))
+            return {"rows": [{"id": 1}]}
+
+    client = FakeClient()
+    registry = SkillRegistry([
+        Skill("crm", "CRM operations", ("sql_query",), "database"),
+    ])
+    runtime_tools = build_skill_runtime_tools(registry, lambda _: client)
+    discover_tool, invoke_tool = runtime_tools
+
+    discovered = await discover_tool.ainvoke({"skill_name": "crm"})
+    result = await invoke_tool.ainvoke(
+        {
+            "skill_name": "crm",
+            "tool_name": "sql_query",
+            "arguments": {"sql": "SELECT 1"},
+        }
+    )
+
+    assert discovered[0]["name"] == "sql_query"
+    assert result == {"rows": [{"id": 1}]}
+    assert client.discover_calls == 1
+    assert client.call_args == [("sql_query", {"sql": "SELECT 1"})]
+
+
+@pytest.mark.asyncio
+async def test_runtime_repeated_discovery_uses_cached_definitions():
+    class FakeClient:
+        def __init__(self):
+            self.discover_calls = 0
+
+        async def discover_tools(self):
+            self.discover_calls += 1
+            return [MCPTool("sql_query", "执行 SQL", {"type": "object"})]
+
+        async def call(self, name, arguments):
+            return {"ok": True}
+
+    client = FakeClient()
+    registry = SkillRegistry([
+        Skill("crm", "CRM operations", ("sql_query",), "database"),
+    ])
+    discover_tool, _ = build_skill_runtime_tools(registry, lambda _: client)
+
+    await discover_tool.ainvoke({"skill_name": "crm"})
+    await discover_tool.ainvoke({"skill_name": "crm"})
+    await discover_tool.ainvoke({"skill_name": "crm"})
+
+    assert client.discover_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_invoke_requires_discovery_first():
+    class FakeClient:
+        async def discover_tools(self):
+            raise AssertionError("discovery should not happen during invoke")
+
+        async def call(self, name, arguments):
+            raise AssertionError("call should not happen without discovery")
+
+    registry = SkillRegistry([
+        Skill("crm", "CRM operations", ("sql_query",), "database"),
+    ])
+    _, invoke_tool = build_skill_runtime_tools(registry, lambda _: FakeClient())
+
+    with pytest.raises(ValueError, match="has not been discovered"):
+        await invoke_tool.ainvoke(
+            {
+                "skill_name": "crm",
+                "tool_name": "sql_query",
+                "arguments": {"sql": "SELECT 1"},
+            }
+        )
+
+
 def test_deepagent_does_not_receive_concrete_mcp_tools(monkeypatch):
     import app.agents.deepagents as deepagents_module
 
