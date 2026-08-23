@@ -9,14 +9,14 @@ from fastapi import FastAPI, Request
 from app.agents.mcp_registry import mcp_registry
 from app.api.analysis import initialize_task_store
 from app.api.analysis import router as analysis_router
+from app.api.conversations import router as conversations_router
+from app.api.conversations import configure_memory_store
 from app.core.checkpoint import close_checkpointer, initialize_checkpointer
 from app.core.config import settings
 from app.core.health import dependency_status
+from app.core.memory_store import PostgresMemoryStore
 
 
-# Uvicorn normally configures logging, but explicitly attach a console handler to
-# the application logger so diagnostics are visible when the app is started in
-# other ways (python, IDE, tests, etc.).
 logger = logging.getLogger("app")
 logger.setLevel(logging.INFO)
 logger.propagate = True
@@ -40,6 +40,10 @@ async def lifespan(_app: FastAPI):
     initialize_task_store()
     logger.info("application.task_store.initialized")
     if settings.environment != "test":
+        memory_store = PostgresMemoryStore()
+        memory_store.setup()
+        configure_memory_store(memory_store)
+        logger.info("application.memory_store.initialized")
         await initialize_checkpointer()
         logger.info("application.checkpointer.initialized")
         await mcp_registry.initialize()
@@ -97,6 +101,7 @@ async def request_logging_middleware(request: Request, call_next):
 
 
 app.include_router(analysis_router)
+app.include_router(conversations_router)
 
 
 @app.get("/health")
