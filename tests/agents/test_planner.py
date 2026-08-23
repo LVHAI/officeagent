@@ -1,4 +1,9 @@
-from app.agents.planner import extract_execution_plan
+from app.agents.planner import create_execution_planner, extract_execution_plan
+
+
+def test_create_execution_planner_is_importable():
+    planner = create_execution_planner()
+    assert planner is not None
 
 
 def test_extract_execution_plan_from_structured_tool_call():
