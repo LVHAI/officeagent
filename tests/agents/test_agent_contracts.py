@@ -17,6 +17,7 @@ def test_agent_contracts_preserve_execution_context_and_sources():
         elapsed_ms=12.5,
     )
 
+    serialized = output.to_dict()
     assert request.parent_agent_id == "supervisor"
     assert request.context["customer_id"] == "C001"
-    assert output.sources[0].metadata["rows"] == 1
+    assert serialized["sources"][0]["metadata"]["rows"] == 1
