@@ -501,7 +501,81 @@ MCP Tool 主要由 Tool Agent 使用。Supervisor 不直接依赖具体 MCP Tool
 - Dynamic Tool Loading
 - Skill-to-MCP mapping
 
-Tool Agent 首先加载 Skill 能力描述，再按任务动态加载具体 MCP Tools，避免将全部 Tool Schema 注入 Context。
+Skill System 必须遵循 **Skill → MCP** 的单向边界，Tool Agent 不直接持有企业 MCP Tool Registry 中的具体工具。
+
+Tool Agent 的执行流程必须固定为：
+
+```text
+用户任务
+  ↓
+Tool Agent 判断使用哪个 Skill
+  ↓
+读取该 Skill 的 metadata
+  ↓
+读取该 Skill 的完整 SKILL.md
+  ↓
+Skill 声明允许使用的 MCP Server / MCP Tools
+  ↓
+Dynamic MCP Tool Discovery
+  ↓
+只加载该 Skill 声明的 MCP Tool Schema
+  ↓
+Tool Agent 选择实际需要的 MCP Tool
+  ↓
+MCP Tool Invocation
+  ↓
+Tool Result
+```
+
+每个 `SKILL.md` 必须通过 frontmatter 声明自身的 MCP 边界，例如：
+
+```yaml
+---
+name: crm
+description: CRM customer analysis and PostgreSQL access through the Database MCP sql_query tool.
+mcp_server: database
+mcp_tools:
+  - sql_query
+---
+```
+
+要求：
+
+- Skill metadata 只用于 Skill Selection，不包含完整 MCP Tool Schema。
+- 完整 `SKILL.md` 只在 Skill 被选中后读取。
+- MCP Tool Schema 只在选中 Skill 后动态 Discovery。
+- 未被选中的 Skill，其 MCP Tool Schema 不得进入 Tool Agent Context。
+- Supervisor 不直接注册企业 MCP Tools，也不依赖具体 MCP Tool Schema。
+- Tool Agent 初始 Context 不包含 CRM、SQL、Report 等全部 MCP Tool Schema。
+- 一个 Skill 可以声明一个或多个 MCP Tools，但 Agent 只能选择当前 Skill 声明且 Discovery 到的工具。
+- MCP 数量增加时，Tool Agent Context 不应随着全部 MCP 数量线性增长。
+- Skill 是业务语义与 MCP 实现之间的隔离层，MCP Server / Tool 名称发生变化时优先修改 Skill mapping，而不是修改 Supervisor 路由逻辑。
+
+因此：
+
+```text
+CRM 请求
+  → Tool Agent
+  → CRM Skill
+  → Discovery CRM Skill 声明的 MCP
+  → 选择最少必要 MCP Tool
+
+通用 SQL 请求
+  → Tool Agent
+  → SQL Skill
+  → Discovery SQL Skill 声明的 MCP
+  → 选择最少必要 MCP Tool
+```
+
+禁止实现为：
+
+```text
+Tool Agent
+  ↓
+一次性注册全部 MCP Tools
+  ↓
+让模型从全部 MCP Schema 中自行选择
+```
 
 Supervisor 只需要知道 Tool Agent 的能力边界，不需要知道每一个 MCP Tool 的底层 Schema。
 
