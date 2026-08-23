@@ -17,8 +17,23 @@ def test_skill_registry_loads_only_allowed_tools():
 
 
 def test_unknown_skill_is_rejected():
+    with pytest.raises(KeyError, match="available skills"):
+        SkillRegistry([Skill("crm", "CRM operations")]).get("missing")
+
+
+def test_skill_alias_resolves_to_canonical_name():
+    registry = SkillRegistry([Skill("crm", "CRM operations")])
+
+    assert registry.get("crm") .name == "crm"
+    assert registry.get("crm_skill").name == "crm"
+    assert registry.get("crm_customer_info_skill").name == "crm"
+
+
+def test_skill_alias_does_not_match_unrelated_skill():
+    registry = SkillRegistry([Skill("sql", "SQL operations")])
+
     with pytest.raises(KeyError):
-        SkillRegistry().get("missing")
+        registry.get("crm_customer_info_skill")
 
 
 def test_skill_metadata_contains_explicit_mcp_boundary():
@@ -46,6 +61,7 @@ def test_tool_runtime_exposes_only_skill_operations():
         "invoke_skill_mcp_tool",
     ]
     assert all(tool.name != "sql_query" for tool in runtime_tools)
+    assert all("crm" in tool.description for tool in runtime_tools)
 
 
 def test_deepagent_does_not_receive_concrete_mcp_tools(monkeypatch):
