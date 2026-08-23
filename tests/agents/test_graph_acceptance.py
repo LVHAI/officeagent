@@ -6,12 +6,34 @@ from app.agents.graph import build_workflow, new_task_state, supervisor_node
 from app.core.config import settings
 
 
+def _plan_result(agent="tool-agent", query="查询 CRM"):
+    return {
+        "messages": [
+            {
+                "type": "ai",
+                "tool_calls": [
+                    {
+                        "name": "submit_execution_plan",
+                        "args": {
+                            "tasks": [
+                                {"task_id": "task-1", "agent": agent, "query": query}
+                            ],
+                            "rationale": "minimum required agent",
+                        },
+                        "id": "plan-1",
+                    }
+                ],
+            }
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_supervisor_failure_isolated_as_partial_result():
     failed = Mock()
     failed.ainvoke = AsyncMock(side_effect=RuntimeError("model unavailable"))
 
-    with patch("app.agents.graph.create_supervisor", return_value=failed):
+    with patch("app.agents.graph.create_execution_planner", return_value=failed):
         result = await supervisor_node(new_task_state("分析销售趋势"))
 
     assert result["status"] == "partial"
@@ -20,58 +42,17 @@ async def test_supervisor_failure_isolated_as_partial_result():
 
 
 @pytest.mark.asyncio
-async def test_delegation_trace_comes_from_real_task_tool_call():
-    agent = Mock()
-    agent.ainvoke = AsyncMock(
-        return_value={
-            "messages": [
-                {
-                    "type": "ai",
-                    "tool_calls": [
-                        {
-                            "name": "task",
-                            "args": {
-                                "subagent_type": "tool-agent",
-                                "description": "查询 CRM 客户数据",
-                            },
-                            "id": "call-1",
-                        }
-                    ],
-                },
-                {
-                    "type": "tool",
-                    "tool_call_id": "call-1",
-                    "content": "tool-agent result",
-                },
-            ]
-        }
-    )
+async def test_supervisor_only_creates_planned_delegation():
+    planner = Mock()
+    planner.ainvoke = AsyncMock(return_value=_plan_result())
 
-    with patch("app.agents.graph.create_supervisor", return_value=agent):
-        result = await supervisor_node(new_task_state("分析客户流失"))
+    with patch("app.agents.graph.create_execution_planner", return_value=planner):
+        result = await supervisor_node(new_task_state("查询 CRM"))
 
     assert len(result["delegations"]) == 1
     delegation = result["delegations"][0]
     assert delegation["child_agent_id"] == "tool-agent"
-    assert delegation["status"] == "delegated"
-    assert delegation["reason"] == "查询 CRM 客户数据"
-
-
-@pytest.mark.asyncio
-async def test_supervisor_text_mention_does_not_create_fake_delegation():
-    agent = Mock()
-    agent.ainvoke = AsyncMock(
-        return_value={
-            "messages": [
-                {"type": "ai", "content": "建议后续考虑 tool-agent 和 web-agent。"},
-            ]
-        }
-    )
-
-    with patch("app.agents.graph.create_supervisor", return_value=agent):
-        result = await supervisor_node(new_task_state("给出分析建议"))
-
-    assert result["delegations"] == []
+    assert delegation["status"] == "planned"
 
 
 def test_workflow_uses_memory_checkpoint_for_tests(monkeypatch):
@@ -88,4 +69,6 @@ def test_new_task_state_has_isolated_execution_state():
     assert first["errors"] == []
     assert first["traces"] == []
     assert first["delegations"] == []
+    assert first["agent_outputs"] == []
+    assert first["replan_count"] == 0
     assert second["errors"] == []
