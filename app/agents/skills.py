@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -250,11 +251,13 @@ def build_skill_runtime_tools(
             raise ValueError(f"MCP tool {tool_name!r} was not discovered for Skill {skill_name!r}")
 
         client = get_client(skill.mcp_server)
+        invocation_id = uuid.uuid4().hex[:12]
         arguments_text = _serialize_tool_arguments(arguments)
         sql = arguments.get("sql") if isinstance(arguments, dict) else None
         started = time.perf_counter()
         logger.info(
-            "skill.mcp.invoke.start skill=%s server=%s tool=%s arguments=%s sql=%s",
+            "skill.mcp.invoke.start invocation_id=%s skill=%s server=%s tool=%s arguments=%s sql=%s",
+            invocation_id,
             skill.name,
             skill.mcp_server,
             definition.name,
@@ -265,7 +268,8 @@ def build_skill_runtime_tools(
             result = await client.call(definition.name, arguments)
         except Exception:
             logger.exception(
-                "skill.mcp.invoke.failed skill=%s server=%s tool=%s elapsed_ms=%.1f arguments=%s sql=%s",
+                "skill.mcp.invoke.failed invocation_id=%s skill=%s server=%s tool=%s elapsed_ms=%.1f arguments=%s sql=%s",
+                invocation_id,
                 skill.name,
                 skill.mcp_server,
                 definition.name,
@@ -275,7 +279,8 @@ def build_skill_runtime_tools(
             )
             raise
         logger.info(
-            "skill.mcp.invoke.completed skill=%s server=%s tool=%s elapsed_ms=%.1f result_type=%s",
+            "skill.mcp.invoke.completed invocation_id=%s skill=%s server=%s tool=%s elapsed_ms=%.1f result_type=%s",
+            invocation_id,
             skill.name,
             skill.mcp_server,
             definition.name,
