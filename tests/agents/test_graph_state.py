@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -14,11 +14,36 @@ class FakeAgent:
         return self.result
 
 
+def _plan_result():
+    return {
+        "messages": [
+            {
+                "type": "ai",
+                "tool_calls": [
+                    {
+                        "name": "submit_execution_plan",
+                        "args": {
+                            "tasks": [
+                                {"task_id": "knowledge", "agent": "knowledge-agent", "query": "查销售制度"}
+                            ]
+                        },
+                        "id": "plan-1",
+                    }
+                ],
+            }
+        ]
+    }
+
+
 @pytest.mark.asyncio
 async def test_workflow_preserves_task_state_and_report(monkeypatch):
     monkeypatch.setattr(settings, "environment", "test")
-    with patch("app.agents.graph.create_supervisor", return_value=FakeAgent({"messages": ["knowledge-agent"]})), patch(
-        "app.agents.graph.create_report_agent", return_value=FakeAgent({"structured_response": {"summary": "ok"}})
+    with patch("app.agents.graph.create_execution_planner", return_value=FakeAgent(_plan_result())), patch(
+        "app.agents.graph.create_knowledge_agent",
+        return_value=FakeAgent({"messages": [{"type": "ai", "content": "制度结果"}]}),
+    ), patch(
+        "app.agents.graph.create_report_agent",
+        return_value=FakeAgent({"summary": "ok"}),
     ):
         workflow = build_workflow()
         state = new_task_state("销售分析")
@@ -27,3 +52,4 @@ async def test_workflow_preserves_task_state_and_report(monkeypatch):
     assert result["task_id"] == state["task_id"]
     assert result["report"]
     assert result["traces"]
+    assert result["agent_outputs"]
