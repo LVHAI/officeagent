@@ -4,6 +4,7 @@ from app.agents.execution_plan import ExecutionPlan
 from app.agents.planner import (
     PLAN_TOOL,
     create_execution_planner,
+    create_supervisor,
     extract_execution_plan,
     validate_agent_selection,
 )
@@ -12,6 +13,11 @@ from app.agents.planner import (
 def test_create_execution_planner_is_importable():
     planner = create_execution_planner()
     assert planner is not None
+
+
+def test_create_supervisor_is_the_canonical_planning_factory():
+    supervisor = create_supervisor()
+    assert supervisor is not None
 
 
 def test_planner_tool_exposes_explicit_function_schema():
