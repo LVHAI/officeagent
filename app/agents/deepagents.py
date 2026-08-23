@@ -214,6 +214,23 @@ def create_knowledge_agent(tools=None):
     )
 
 
+def create_tool_agent(tools=None):
+    model = build_chat_model()
+    runtime_tools = tools or build_skill_runtime_tools(SKILL_REGISTRY, mcp_registry.get_client)
+    return create_deep_agent(
+        model=model,
+        system_prompt=TOOL_PROMPT,
+        backend=build_agent_backend(),
+        tools=runtime_tools,
+        skills=[SKILLS_PATH],
+    )
+
+
+def create_web_agent(tools=None):
+    runtime_tools = tools if tools is not None else ([build_tavily_search()] if build_tavily_search() else [])
+    return create_agent(model=build_chat_model(), tools=runtime_tools, system_prompt=WEB_PROMPT)
+
+
 class _ReportAgent:
     """Adapter exposing the same ainvoke contract used by graph._invoke."""
 
