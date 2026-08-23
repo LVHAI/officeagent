@@ -5,6 +5,7 @@ import time
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.mcp_registry import mcp_registry
 from app.api.analysis import initialize_task_store
@@ -54,6 +55,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="OfficeAgent", version="0.1.0", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 
 @app.middleware("http")
