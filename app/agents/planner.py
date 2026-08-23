@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from deepagents import create_deep_agent
-from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+from deepagents.backends import CompositeBackend, StateBackend
 from langchain_core.tools import StructuredTool
 
 from app.agents.execution_plan import ExecutionPlan
@@ -77,7 +77,10 @@ def extract_execution_plan(result: Any) -> ExecutionPlan:
     messages = result.get("messages", []) if isinstance(result, dict) else []
     calls: list[dict[str, Any]] = []
     for message in messages:
-        tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else getattr(message, "tool_calls", [])
+        if isinstance(message, dict):
+            tool_calls = message.get("tool_calls", [])
+        else:
+            tool_calls = getattr(message, "tool_calls", [])
         for call in tool_calls or []:
             name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
             if name == "submit_execution_plan":
@@ -86,5 +89,8 @@ def extract_execution_plan(result: Any) -> ExecutionPlan:
         raise ValueError(
             f"Supervisor must call submit_execution_plan exactly once; got {len(calls)}"
         )
-    args = calls[0].get("args", {}) if isinstance(calls[0], dict) else getattr(calls[0], "args", {})
+    if isinstance(calls[0], dict):
+        args = calls[0].get("args", {})
+    else:
+        args = getattr(calls[0], "args", {})
     return ExecutionPlan.model_validate(args)
