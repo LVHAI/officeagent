@@ -210,9 +210,23 @@ def _route_after_replan(state: AgentState) -> str:
 
 async def report_node(state: AgentState) -> dict[str, Any]:
     task_id = state["task_id"]
-    context = {"query": state["query"], "execution_plan": state.get("execution_plan"), "aggregated_context": state.get("aggregated_context", {}), "errors": state.get("errors", []), "delegations": state.get("delegations", [])}
+    # Report only needs the user request, compact evidence and failures. Execution
+    # plan/delegation metadata is already represented by traces and adds no evidence.
+    context = {
+        "query": state["query"],
+        "evidence": state.get("aggregated_context", {}),
+        "errors": state.get("errors", []),
+        "report_policy": {
+            "facts_require_evidence": True,
+            "recommendations_must_be_labeled": True,
+            "insufficient_evidence_must_be_stated": True,
+            "never_infer_customer_attributes_or_market_fit_without_source_evidence": True,
+        },
+    }
+    context_text = json.dumps(context, ensure_ascii=False, default=str)
+    logger.info("workflow.report.context task_id=%s context_length=%d", task_id, len(context_text))
     try:
-        result, trace = await _invoke(create_report_agent(), str(context), "report", task_id, parent_agent_id="supervisor")
+        result, trace = await _invoke(create_report_agent(), context_text, "report", task_id, parent_agent_id="supervisor")
         return {"report": result, "status": "completed" if not state.get("errors") else "partial", "traces": [trace], "agent_outputs": [_agent_output("report", result, trace)]}
     except asyncio.CancelledError:
         raise
