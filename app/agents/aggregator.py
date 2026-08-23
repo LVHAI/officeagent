@@ -5,6 +5,8 @@ from typing import Any
 
 from app.agents.contracts import Source
 
+REPORT_RESULT_MAX_CHARS = 6000
+
 
 def _source_key(source: Any) -> tuple[str, str, str]:
     if isinstance(source, dict):
@@ -27,6 +29,56 @@ def _json_value(value: Any) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return None
+
+
+def _truncate_text(value: str, limit: int = REPORT_RESULT_MAX_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}\n...[truncated for report context]"
+
+
+def _message_content(message: Any) -> str | None:
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content
+    return None
+
+
+def compact_result_for_report(result: Any, limit: int = REPORT_RESULT_MAX_CHARS) -> Any:
+    """Remove agent execution envelopes before sending results to the Report Agent.
+
+    Full AgentOutput remains in workflow state for tracing/audit. The Report Agent only
+    needs the final evidence-bearing content, not LangGraph message history, tool-call
+    envelopes, or intermediate execution metadata.
+    """
+    if isinstance(result, dict):
+        messages = result.get("messages")
+        if isinstance(messages, list):
+            contents = [_message_content(message) for message in messages]
+            contents = [content for content in contents if content]
+            compact: dict[str, Any] = {
+                key: value
+                for key, value in result.items()
+                if key not in {"messages", "intermediate_steps", "trace", "metadata"}
+            }
+            if contents:
+                compact["final_evidence"] = _truncate_text("\n\n".join(contents), limit)
+            return compact
+
+        encoded = json.dumps(result, ensure_ascii=False, default=str)
+        return _truncate_text(encoded, limit)
+
+    if isinstance(result, (list, tuple)):
+        encoded = json.dumps(result, ensure_ascii=False, default=str)
+        return _truncate_text(encoded, limit)
+
+    if isinstance(result, str):
+        return _truncate_text(result, limit)
+
+    return result
 
 
 def extract_sources(result: Any) -> list[Source]:
@@ -123,3 +175,35 @@ def aggregate_agent_outputs(outputs: list[dict[str, Any]]) -> dict[str, Any]:
         "sources": [source.__dict__ for source in sources],
         "has_partial_result": bool(failed),
     }
+
+
+def build_report_context(context: dict[str, Any]) -> dict[str, Any]:
+    """Create the small, evidence-focused context consumed by Report Agent.
+
+    Execution traces, delegation records and raw message histories stay in LangGraph
+    state for auditability but are deliberately excluded from the LLM prompt.
+    """
+    report_context: dict[str, Any] = {
+        "sources": context.get("sources", []),
+        "has_partial_result": bool(context.get("has_partial_result")),
+        "successful_results": [],
+        "partial_results": [],
+        "failed_results": [],
+    }
+
+    for bucket in ("successful_results", "partial_results", "failed_results"):
+        for output in context.get(bucket, []):
+            report_context[bucket].append(
+                {
+                    "agent_id": output.get("agent_id"),
+                    "status": output.get("status"),
+                    "result": compact_result_for_report(output.get("result")),
+                    "sources": [
+                        source.__dict__ if isinstance(source, Source) else source
+                        for source in output.get("sources", [])
+                    ],
+                    "errors": output.get("errors", []),
+                }
+            )
+
+    return report_context
