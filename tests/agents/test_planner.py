@@ -55,22 +55,32 @@ def test_extract_execution_plan_from_executed_tool_message():
     assert plan.rationale == "需要当前外部信息"
 
 
-def test_extract_execution_plan_deduplicates_ai_and_tool_message():
-    call = {
-        "name": "submit_execution_plan",
-        "args": {
-            "tasks": [
-                {"task_id": "k", "agent": "knowledge-agent", "query": "查制度"}
-            ]
-        },
+def test_extract_execution_plan_deduplicates_ai_and_tool_message_with_defaults():
+    args = {
+        "tasks": [
+            {"task_id": "k", "agent": "knowledge-agent", "query": "查制度"}
+        ]
+    }
+    executed = {
+        "tasks": [
+            {
+                "task_id": "k",
+                "agent": "knowledge-agent",
+                "query": "查制度",
+                "depends_on": [],
+                "parallel_group": "default",
+                "constraints": {},
+            }
+        ],
+        "rationale": "",
     }
     result = {
         "messages": [
-            {"type": "ai", "tool_calls": [call]},
+            {"type": "ai", "tool_calls": [{"name": "submit_execution_plan", "args": args}]},
             {
                 "type": "tool",
                 "name": "submit_execution_plan",
-                "content": json.dumps(call["args"]),
+                "content": json.dumps(executed),
                 "tool_call_id": "call-1",
             },
         ]
