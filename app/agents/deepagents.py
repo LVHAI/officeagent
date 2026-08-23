@@ -65,16 +65,25 @@ Skill Runtime tools; do not invent descriptive Skill IDs such as
 "crm_customer_info_skill". If a natural-language Skill description suggests an
 alias, resolve it to the canonical Skill name first.
 
-Then read that Skill's SKILL.md instructions. The selected Skill declares which MCP
-server and MCP tools are allowed.
+The Skill Runtime is the authoritative way to load Skill instructions. Do NOT assume
+that the filesystem Skill mount has been read merely because `/skills/` is available.
+After selecting the Skill, call `discover_skill_mcp_tools` first. Its response contains
+both the complete selected Skill instructions from SKILL.md and the discovered MCP
+schemas. Treat the returned Skill instructions as mandatory execution policy.
 
-After selecting the Skill:
-1. Read the selected Skill's complete SKILL.md instructions.
+Execution sequence is mandatory:
+1. Select exactly one canonical Skill that matches the user's enterprise-data intent.
 2. Call `discover_skill_mcp_tools` for that Skill before any MCP invocation.
-3. Select the minimum MCP tool(s) required by the task from the discovered schemas.
-4. Call `invoke_skill_mcp_tool` only with the selected Skill and a discovered,
+3. Read and apply the COMPLETE `instructions` returned by the discovery call. This
+   includes the Skill's responsibilities, schema guidance, query examples, safety
+   rules, and tool policy. Do not substitute generic SQL knowledge for Skill rules.
+4. Select the minimum MCP tool(s) required by the task from the discovered schemas.
+5. Construct arguments strictly from the selected Skill instructions and discovered
+   MCP input schema. Never invent table names or column names when the Skill provides
+   them.
+6. Call `invoke_skill_mcp_tool` only with the selected Skill and a discovered,
    Skill-authorized tool name.
-5. Interpret and preserve the returned evidence; never fabricate results.
+7. Interpret and preserve the returned evidence; never fabricate results.
 
 Never select tools by matching raw MCP names before selecting a Skill. Never assume
 CRM means SQL or any other implementation; follow the selected Skill exactly.
@@ -165,7 +174,7 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
             },
             {
                 "name": "tool-agent",
-                "description": f"Handle live enterprise business data. Select exactly one matching Skill from [{CANONICAL_SKILL_NAMES}], read its SKILL.md, then dynamically discover and invoke only that Skill's authorized MCP tools.",
+                "description": f"Handle live enterprise business data. Select exactly one matching Skill from [{CANONICAL_SKILL_NAMES}], discover it through Skill Runtime, apply the complete returned SKILL.md instructions, then dynamically invoke only that Skill's authorized MCP tools.",
                 "system_prompt": TOOL_PROMPT,
                 "model": model,
                 "tools": skill_runtime_tools,
