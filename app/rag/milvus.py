@@ -21,11 +21,6 @@ class MilvusRepository:
         self._create_collection(dimension)
 
     def reset_collection(self, dimension: int) -> None:
-        """清空本次 Corpus 对应的 collection 后重新建立 schema/index。
-
-        每次执行 data 全量入库都调用此方法，确保 Milvus 不残留上一次运行的数据。
-        采用 drop + recreate 而不是逐条 delete，同时能够处理 Embedding 维度变化。
-        """
         if self.client.has_collection(self.collection):
             self.client.drop_collection(self.collection)
         self._create_collection(dimension)
@@ -42,7 +37,6 @@ class MilvusRepository:
         self.client.create_collection(self.collection, schema=schema, index_params=index_params)
 
     def insert(self, chunks: Sequence[DocumentChunk], vectors: Sequence[Sequence[float]]) -> None:
-        """批量写入文档向量；metadata 使用 Milvus dynamic fields 保存。"""
         if len(chunks) != len(vectors):
             raise ValueError("chunks and vectors must have the same length")
         rows = [
@@ -63,7 +57,6 @@ class MilvusRepository:
         limit: int = 50,
         metadata_filter: Mapping[str, str] | None = None,
     ) -> list[RetrievalResult]:
-        """执行 Milvus 向量搜索，并在数据库侧应用 metadata filter。"""
         kwargs: dict = {
             "collection_name": self.collection,
             "data": [list(vector)],
@@ -92,7 +85,13 @@ class MilvusRepository:
                         id=str(hit["id"]),
                         content=entity["content"],
                         metadata=metadata,
-                        source=Source(chunk_id=str(hit["id"])),
+                        source=Source(
+                            document=metadata.get("document"),
+                            page=metadata.get("page"),
+                            section=metadata.get("section") or metadata.get("chapter"),
+                            article=metadata.get("article"),
+                            chunk_id=str(hit["id"]),
+                        ),
                     ),
                     score=float(hit["distance"]),
                     route="vector",
