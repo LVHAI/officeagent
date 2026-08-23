@@ -1,5 +1,6 @@
 import json
 
+from app.agents.execution_plan import ExecutionPlan
 from app.agents.planner import PLAN_TOOL, create_execution_planner, extract_execution_plan
 
 
@@ -183,3 +184,16 @@ def test_extract_execution_plan_rejects_different_tool_calls():
         assert "multiple different execution plans" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_supervisor_plan_does_not_use_keyword_router_to_rewrite_selection():
+    plan = ExecutionPlan.model_validate(
+        {
+            "tasks": [
+                {"task_id": "k", "agent": "knowledge-agent", "query": "根据内部知识回答"},
+                {"task_id": "t", "agent": "tool-agent", "query": "查询客户数据"},
+            ]
+        }
+    )
+
+    assert [task.agent for task in plan.tasks] == ["knowledge-agent", "tool-agent"]
