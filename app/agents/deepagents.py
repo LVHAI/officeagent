@@ -112,9 +112,11 @@ Skill selection or invoke a concrete MCP tool directly.
 
 WEB_PROMPT = """
 You are the Web Agent. Use the web_search tool only when current or external
-information is required. Filter search results, extract evidence, and preserve
-source URLs, titles, and retrieval timestamps. Do not use Web Search for internal
-Knowledge Base retrieval; that belongs to Knowledge Agent.
+information is required. For a delegated Web task, you MUST call web_search before
+producing an answer. If web_search fails or is unavailable, report the failure and do
+not substitute model memory or fabricate current facts. Filter search results, extract
+evidence, and preserve source URLs, titles, and retrieval timestamps. Do not use Web
+Search for internal Knowledge Base retrieval; that belongs to Knowledge Agent.
 """.strip()
 
 REPORT_PROMPT = """
@@ -139,22 +141,41 @@ def submit_analysis_report(
 
 
 def build_tavily_search() -> Any:
-    if not settings.tavily_api_key:
+    client = None
+    if settings.tavily_api_key:
+        client = TavilySearch(
+            max_results=5,
+            topic="general",
+            tavily_api_key=settings.tavily_api_key,
+        )
+    else:
         logger.warning("web.search.unavailable reason=tavily_api_key_missing")
-        return None
-
-    client = TavilySearch(
-        max_results=5,
-        topic="general",
-        tavily_api_key=settings.tavily_api_key,
-    )
 
     async def search(query: str) -> Any:
         started = time.perf_counter()
-        logger.info("web.search.start query=%s", query)
+        logger.info(
+            "web.search.start query=%s provider=tavily configured=%s",
+            query,
+            bool(client),
+        )
+        if client is None:
+            error = "Tavily search is unavailable because TAVILY_API_KEY is not configured"
+            logger.error(
+                "web.search.failed query=%s elapsed_ms=%.1f error_type=ConfigurationError error=%s",
+                query,
+                (time.perf_counter() - started) * 1000,
+                error,
+            )
+            raise RuntimeError(error)
+
         try:
             result = await client.ainvoke({"query": query})
-            result_count = len(result) if isinstance(result, list) else 1
+            if isinstance(result, dict):
+                result_count = len(result.get("results", []))
+            elif isinstance(result, list):
+                result_count = len(result)
+            else:
+                result_count = 1
             logger.info(
                 "web.search.completed query=%s result_count=%d elapsed_ms=%.1f",
                 query,
@@ -175,7 +196,7 @@ def build_tavily_search() -> Any:
     return StructuredTool.from_function(
         coroutine=search,
         name="web_search",
-        description="Search the current public web with Tavily and return source-aware results.",
+        description="MANDATORY for delegated current/external research. Search the current public web with Tavily and return source-aware results.",
     )
 
 
@@ -195,7 +216,7 @@ def build_agent_backend() -> Any:
 def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_tools=None):
     model = build_chat_model()
     web_tool = build_tavily_search() if web_tools is None else None
-    external_tools = web_tools if web_tools is not None else ([web_tool] if web_tool is not None else [])
+    external_tools = web_tools if web_tools is not None else [web_tool]
     skill_runtime_tools = build_skill_runtime_tools(SKILL_REGISTRY, mcp_registry.get_client)
     effective_knowledge_tools = knowledge_tools or [knowledge_search]
     logger.info(
@@ -228,7 +249,7 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
             },
             {
                 "name": "web-agent",
-                "description": "Retrieve current external information with the web_search tool. Do not use for internal Knowledge Base data.",
+                "description": "Retrieve current external information with the mandatory web_search tool. Do not use for internal Knowledge Base data.",
                 "system_prompt": WEB_PROMPT,
                 "model": model,
                 "tools": external_tools,
@@ -258,7 +279,7 @@ def create_tool_agent(tools=None):
 
 
 def create_web_agent(tools=None):
-    runtime_tools = tools if tools is not None else ([build_tavily_search()] if build_tavily_search() else [])
+    runtime_tools = tools if tools is not None else [build_tavily_search()]
     return create_agent(model=build_chat_model(), tools=runtime_tools, system_prompt=WEB_PROMPT)
 
 
