@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 
 import pytest
@@ -45,6 +43,62 @@ async def test_dependent_task_waits_for_dependency():
     await execute_with_dependencies(tasks, execute, max_parallel=2)
 
     assert order.index("end:db") < order.index("start:web")
+
+
+@pytest.mark.asyncio
+async def test_dependent_task_receives_dependency_results():
+    received: dict[str, object] = {}
+    tasks = [
+        ExecutionTask(task_id="db", agent="tool-agent", query="db"),
+        ExecutionTask(task_id="web", agent="web-agent", query="web", depends_on=["db"]),
+    ]
+
+    async def execute(task: ExecutionTask):
+        dependency_results = task.constraints.get("dependency_results")
+        if task.task_id == "web":
+            received["dependency_results"] = dependency_results
+        return (
+            {
+                "agent_id": task.agent,
+                "status": "completed",
+                "result": {"rows": [1, 2]},
+                "errors": [],
+                "traces": [],
+            },
+            {},
+        )
+
+    await execute_with_dependencies(tasks, execute, max_parallel=2)
+
+    assert received["dependency_results"] == {"db": {"rows": [1, 2]}}
+
+
+@pytest.mark.asyncio
+async def test_soft_dependency_runs_with_partial_dependency_results():
+    called: list[str] = []
+    tasks = [
+        ExecutionTask(task_id="bad", agent="tool-agent", query="bad"),
+        ExecutionTask(
+            task_id="web",
+            agent="web-agent",
+            query="web",
+            depends_on=["bad"],
+            constraints={"dependency_mode": "soft"},
+        ),
+    ]
+
+    async def execute(task: ExecutionTask):
+        called.append(task.task_id)
+        status = "failed" if task.task_id == "bad" else "completed"
+        return (
+            {"agent_id": task.agent, "status": status, "result": None, "errors": ["boom"] if status == "failed" else [], "traces": []},
+            {},
+        )
+
+    results = await execute_with_dependencies(tasks, execute, max_parallel=2)
+
+    assert called == ["bad", "web"]
+    assert results[1][0]["status"] == "completed"
 
 
 @pytest.mark.asyncio
