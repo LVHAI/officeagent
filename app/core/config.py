@@ -44,6 +44,11 @@ class Settings(BaseSettings):
 
     tavily_api_key: str | None = None
 
+    # Knowledge Agent reads the corpus directly and never accesses it through MCP.
+    # Ingestion and runtime retrieval must use the same collection.
+    rag_corpus_root: str = "data"
+    rag_collection: str = "officeagent_chunks"
+
     @property
     def postgres_dsn(self) -> str:
         return (
