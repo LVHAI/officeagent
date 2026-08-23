@@ -227,12 +227,8 @@ def build_skill_runtime_tools(
     discovered_tools: dict[str, dict[str, MCPTool]] = {}
     skill_instructions: dict[str, str] = {}
 
-    async def discover_skill_mcp_tools(skill_name: str) -> dict[str, Any]:
-        skill = registry.get(skill_name)
-
-        # Frontmatter is loaded during registry initialization. The complete SKILL.md
-        # body is intentionally loaded only after the Agent has selected this Skill.
-        instructions = skill_instructions.get(skill_name)
+    async def _load_skill_instructions(skill: Skill) -> str:
+        instructions = skill_instructions.get(skill.name)
         if instructions is None:
             logger.info(
                 "skill.content.load.start skill=%s path=%s",
@@ -240,7 +236,7 @@ def build_skill_runtime_tools(
                 skill.path,
             )
             instructions = skill.load_instructions()
-            skill_instructions[skill_name] = instructions
+            skill_instructions[skill.name] = instructions
             logger.info(
                 "skill.content.load.completed skill=%s path=%s instructions_length=%d",
                 skill.name,
@@ -253,6 +249,11 @@ def build_skill_runtime_tools(
                 skill.name,
                 len(instructions),
             )
+        return instructions
+
+    async def _discover_skill_mcp_tools(skill_name: str) -> tuple[Skill, str, list[MCPTool]]:
+        skill = registry.get(skill_name)
+        instructions = await _load_skill_instructions(skill)
 
         if not skill.mcp_server:
             logger.info(
@@ -260,11 +261,7 @@ def build_skill_runtime_tools(
                 skill.name,
                 len(instructions),
             )
-            return {
-                "skill_name": skill.name,
-                "instructions": instructions,
-                "tools": [],
-            }
+            return skill, instructions, []
 
         cached = discovered_tools.get(skill_name)
         if cached is not None:
@@ -275,24 +272,27 @@ def build_skill_runtime_tools(
                 len(cached),
                 len(instructions),
             )
-            definitions = list(cached.values())
-        else:
-            client = get_client(skill.mcp_server)
-            logger.info(
-                "skill.mcp.discovery.start skill=%s server=%s",
-                skill.name,
-                skill.mcp_server,
-            )
-            definitions = await discover_skill_tools(client, registry, skill_name)
-            discovered_tools[skill_name] = {definition.name: definition for definition in definitions}
-            logger.info(
-                "skill.mcp.discovery.completed skill=%s server=%s selected=%d instructions_length=%d",
-                skill.name,
-                skill.mcp_server,
-                len(definitions),
-                len(instructions),
-            )
+            return skill, instructions, list(cached.values())
 
+        client = get_client(skill.mcp_server)
+        logger.info(
+            "skill.mcp.discovery.start skill=%s server=%s",
+            skill.name,
+            skill.mcp_server,
+        )
+        definitions = await discover_skill_tools(client, registry, skill_name)
+        discovered_tools[skill_name] = {definition.name: definition for definition in definitions}
+        logger.info(
+            "skill.mcp.discovery.completed skill=%s server=%s selected=%d instructions_length=%d",
+            skill.name,
+            skill.mcp_server,
+            len(definitions),
+            len(instructions),
+        )
+        return skill, instructions, definitions
+
+    async def discover_skill_mcp_tools(skill_name: str) -> dict[str, Any]:
+        skill, instructions, definitions = await _discover_skill_mcp_tools(skill_name)
         return {
             "skill_name": skill.name,
             "instructions": instructions,
@@ -317,11 +317,20 @@ def build_skill_runtime_tools(
         if tool_name not in skill.tool_names:
             raise ValueError(f"Tool {tool_name!r} is not allowed by Skill {skill_name!r}")
 
+        # The model is instructed to discover first, but tool-call ordering is not a
+        # reliable application invariant: a later invocation may be emitted without
+        # repeating the discovery call. Make discovery an idempotent runtime precondition
+        # instead of exposing a request-failing state machine to the LLM.
         definitions = discovered_tools.get(skill_name)
         if definitions is None:
-            raise ValueError(
-                f"Skill {skill_name!r} has not been discovered; call discover_skill_mcp_tools first"
+            logger.info(
+                "skill.mcp.invoke.discovery_missing skill=%s tool=%s action=auto_discover",
+                skill.name,
+                tool_name,
             )
+            _, _, discovered = await _discover_skill_mcp_tools(skill_name)
+            definitions = {definition.name: definition for definition in discovered}
+
         definition = definitions.get(tool_name)
         if definition is None:
             raise ValueError(f"MCP tool {tool_name!r} was not discovered for Skill {skill_name!r}")
@@ -391,8 +400,9 @@ def build_skill_runtime_tools(
                 f"Canonical Skill names are: {available_skills}. "
                 f"Authorized MCP tool names are: {available_tools}. "
                 "The Skill name and tool name must exactly match registered values; do not invent names. "
-                "Call discover_skill_mcp_tools first. The invocation must follow the selected Skill's "
-                "returned SKILL.md instructions and discovered schema."
+                "Call discover_skill_mcp_tools first when possible. If discovery was omitted by the model, "
+                "the runtime will perform the same idempotent Skill discovery before invocation. The invocation "
+                "must follow the selected Skill's returned SKILL.md instructions and discovered schema."
             ),
             args_schema=InvokeArgs,
         ),
