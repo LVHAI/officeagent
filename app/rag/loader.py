@@ -19,7 +19,7 @@ class LoadedDocument:
 
 
 class DocumentLoader:
-    """Load supported office documents and resolve their RAG chunking strategy."""
+    """Load supported office documents while preserving PDF page boundaries."""
 
     def load(self, path: str | Path) -> str:
         file_path = Path(path)
@@ -29,16 +29,20 @@ class DocumentLoader:
         if suffix in {".txt", ".md", ".json"}:
             return file_path.read_text(encoding="utf-8")
         if suffix == ".pdf":
-            return self._load_pdf(file_path)
+            return "\n\n".join(text for _, text in self.load_pages(file_path) if text)
         if suffix == ".docx":
             return self._load_docx(file_path)
         raise ValueError(f"unsupported document type: {suffix}")
 
     @staticmethod
-    def _load_pdf(path: Path) -> str:
+    def load_pages(path: str | Path) -> list[tuple[int, str]]:
+        """Return one normalized text value per PDF page without losing page numbers."""
         reader = PdfReader(str(path))
-        pages = [(page.extract_text() or "").strip() for page in reader.pages]
-        return "\n\n".join(page for page in pages if page)
+        return [
+            (index, text)
+            for index, page in enumerate(reader.pages, start=1)
+            if (text := (page.extract_text() or "").strip())
+        ]
 
     @staticmethod
     def _load_docx(path: Path) -> str:
@@ -56,13 +60,6 @@ class DocumentLoader:
         return "\n".join(blocks)
 
     def resolve_type(self, path: str | Path, corpus_root: str | Path | None = None) -> str:
-        """Resolve the intended chunking strategy from the corpus folder.
-
-        The corpus root may itself contain a wrapper directory such as ``data/rag``.
-        Therefore the strategy is resolved from the first path component that is one
-        of the supported strategy folders, rather than requiring it to be directly
-        under ``corpus_root``.
-        """
         file_path = Path(path)
         if corpus_root is not None:
             root = Path(corpus_root).resolve()
@@ -71,16 +68,11 @@ class DocumentLoader:
                 relative = resolved_path.relative_to(root)
             except ValueError:
                 return DocumentTypeClassifier().classify(file_path.name, self.load(file_path))
-
-            parts = relative.parts[:-1]  # exclude the filename
+            parts = relative.parts[:-1]
             for part in parts:
                 strategy = part.lower()
                 if strategy in SUPPORTED_CHUNKING_STRATEGIES:
                     return strategy
-
-            # Preserve the explicit-folder validation for a corpus whose immediate
-            # child is intended to be a strategy directory, while allowing wrappers
-            # such as data/rag/<strategy>/... when the strategy exists deeper down.
             if parts:
                 immediate = parts[0].lower()
                 if immediate not in {"rag", "data", "documents", "knowledge"}:
@@ -91,7 +83,6 @@ class DocumentLoader:
         return DocumentTypeClassifier().classify(file_path.name, self.load(file_path))
 
     def load_corpus(self, corpus_root: str | Path) -> list[LoadedDocument]:
-        """Read all supported documents and resolve their explicit/fallback strategy."""
         root = Path(corpus_root).resolve()
         if not root.is_dir():
             raise ValueError(f"RAG corpus directory does not exist: {root}")
@@ -99,11 +90,10 @@ class DocumentLoader:
         for path in sorted(root.rglob("*")):
             if not path.is_file() or path.suffix.lower() not in SUPPORTED_SOURCE_SUFFIXES:
                 continue
-            content = self.load(path)
             documents.append(
                 LoadedDocument(
                     path=path,
-                    content=content,
+                    content=self.load(path),
                     doc_type=self.resolve_type(path, root),
                 )
             )
