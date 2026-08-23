@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
+
+from langchain_core.tools import StructuredTool
 
 from app.agents.mcp_client import MCPClient, MCPTool
 
 
 @dataclass(frozen=True)
 class Skill:
-    """Skill 元数据；只描述能力边界，不把全部 MCP Schema 注入 Context。"""
+    """Skill 元数据；只描述能力边界，不把 MCP Schema 注入 Agent Context。"""
 
     name: str
     description: str
     tool_names: tuple[str, ...] = ()
+    mcp_server: str | None = None
+    path: Path | None = None
 
 
 class SkillRegistry:
@@ -28,28 +33,85 @@ class SkillRegistry:
         except KeyError as exc:
             raise KeyError(f"Unknown skill: {name}") from exc
 
+    def all(self) -> list[Skill]:
+        return list(self._skills.values())
+
     def select_tools(self, skill_name: str, tools: list[MCPTool]) -> list[MCPTool]:
         allowed = set(self.get(skill_name).tool_names)
         return [tool for tool in tools if tool.name in allowed]
 
     def route(self, task: str) -> list[Skill]:
-        """轻量 Skill Router；生产环境可替换为模型分类器，但仍受 Registry 白名单约束。"""
+        """提供轻量候选筛选；最终 Skill 选择由 Tool Agent 完成。"""
         text = task.lower()
-        matches = []
+        matches: list[Skill] = []
         for skill in self._skills.values():
-            keywords = {skill.name.lower(), *skill.description.lower().split()}
-            if any(keyword in text for keyword in keywords if len(keyword) > 2):
+            tokens = {skill.name.lower(), *skill.description.lower().split()}
+            if any(token in text for token in tokens if len(token) > 2):
                 matches.append(skill)
         return matches
 
 
-DEFAULT_SKILLS = SkillRegistry(
-    [
-        Skill("sales", "销售 客户 CRM ERP", ("customer_query", "sales_summary")),
-        Skill("knowledge", "知识库 文档 Knowledge", ("knowledge_search",)),
-        Skill("report", "报告 Report", ("report_generate",)),
-    ]
-)
+def load_skill_metadata(skills_root: Path) -> SkillRegistry:
+    """只加载轻量 metadata；完整 SKILL.md 由 Tool Agent 按需读取。"""
+    registry = SkillRegistry()
+    if not skills_root.exists():
+        return registry
+
+    for skill_file in sorted(skills_root.glob("*/SKILL.md")):
+        frontmatter = _read_frontmatter(skill_file)
+        name = str(frontmatter.get("name") or skill_file.parent.name).strip()
+        description = str(frontmatter.get("description") or "").strip()
+        mcp_server = str(frontmatter.get("mcp_server") or "").strip() or None
+        tool_names = tuple(_parse_list(frontmatter.get("mcp_tools", "")))
+        registry.register(
+            Skill(
+                name=name,
+                description=description,
+                tool_names=tool_names,
+                mcp_server=mcp_server,
+                path=skill_file,
+            )
+        )
+    return registry
+
+
+def _read_frontmatter(path: Path) -> dict[str, str]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+
+    result: dict[str, str] = {}
+    current_list_key: str | None = None
+    list_values: dict[str, list[str]] = {}
+
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        stripped = line.strip()
+        if stripped.startswith("- ") and current_list_key:
+            list_values.setdefault(current_list_key, []).append(stripped[2:].strip().strip("'\""))
+            continue
+        if ":" not in line or line.startswith(" "):
+            current_list_key = None
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip().strip("'\"")
+        result[key] = value
+        current_list_key = key if not value else None
+
+    for key, values in list_values.items():
+        result[key] = ",".join(values)
+    return result
+
+
+def _parse_list(value: str) -> list[str]:
+    value = value.strip()
+    if not value:
+        return []
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    return [item.strip().strip("'\"") for item in value.split(",") if item.strip()]
 
 
 async def discover_skill_tools(
@@ -57,5 +119,81 @@ async def discover_skill_tools(
     registry: SkillRegistry,
     skill_name: str,
 ) -> list[MCPTool]:
-    """动态发现 MCP Schema，并只返回当前 Skill 允许使用的工具。"""
-    return registry.select_tools(skill_name, await client.discover_tools())
+    """动态发现一个 Skill 对应的 MCP Schema，并执行 Skill 白名单过滤。"""
+    skill = registry.get(skill_name)
+    if not skill.mcp_server:
+        return []
+    definitions = await client.discover_tools()
+    selected = registry.select_tools(skill_name, definitions)
+    logger = __import__("logging").getLogger(__name__)
+    logger.info(
+        "skill.mcp.discovery skill=%s server=%s discovered=%d selected=%d",
+        skill.name,
+        skill.mcp_server,
+        len(definitions),
+        len(selected),
+    )
+    return selected
+
+
+def build_skill_runtime_tools(
+    registry: SkillRegistry,
+    get_client: Callable[[str], MCPClient],
+) -> list[StructuredTool]:
+    """Only expose Skill runtime operations; concrete MCP tools never enter Agent Context."""
+
+    async def discover_skill_mcp_tools(skill_name: str) -> list[dict[str, Any]]:
+        skill = registry.get(skill_name)
+        if not skill.mcp_server:
+            return []
+        client = get_client(skill.mcp_server)
+        definitions = await discover_skill_tools(client, registry, skill_name)
+        return [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "input_schema": definition.input_schema,
+            }
+            for definition in definitions
+        ]
+
+    async def invoke_skill_mcp_tool(
+        skill_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> Any:
+        skill = registry.get(skill_name)
+        if not skill.mcp_server:
+            raise ValueError(f"Skill {skill_name!r} has no MCP server mapping")
+        if tool_name not in skill.tool_names:
+            raise ValueError(f"Tool {tool_name!r} is not allowed by Skill {skill_name!r}")
+
+        client = get_client(skill.mcp_server)
+        definitions = await discover_skill_tools(client, registry, skill_name)
+        definition_names = {definition.name for definition in definitions}
+        if tool_name not in definition_names:
+            raise ValueError(f"MCP tool {tool_name!r} was not discovered for Skill {skill_name!r}")
+
+        return await client.call(tool_name, arguments)
+
+    return [
+        StructuredTool.from_function(
+            coroutine=discover_skill_mcp_tools,
+            name="discover_skill_mcp_tools",
+            description=(
+                "Discover MCP tool schemas only for the selected Skill. "
+                "Select a Skill first and call this before MCP invocation."
+            ),
+        ),
+        StructuredTool.from_function(
+            coroutine=invoke_skill_mcp_tool,
+            name="invoke_skill_mcp_tool",
+            description=(
+                "Invoke one MCP tool explicitly authorized by the selected Skill. "
+                "The concrete MCP tool is never registered in the Agent context."
+            ),
+        ),
+    ]
+
+
+DEFAULT_SKILLS = SkillRegistry()
