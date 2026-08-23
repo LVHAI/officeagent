@@ -81,9 +81,7 @@ async def _invoke(agent: Any, query: str, agent_id: str, task_id: str, parent_ag
         operation = asyncio.create_task(
             agent.ainvoke({"messages": [{"role": "user", "content": query}], "task_id": task_id})
         )
-        progress_task = asyncio.create_task(
-            _log_agent_progress(operation, task_id, agent_id, attempt_started)
-        )
+        progress_task = asyncio.create_task(_log_agent_progress(operation, task_id, agent_id, attempt_started))
         try:
             return await run_with_timeout(operation, timeout=AGENT_TIMEOUT_SECONDS)
         finally:
@@ -155,14 +153,7 @@ def _sources_from_result(result: Any) -> list[Source]:
     return sources
 
 
-def _agent_output(
-    agent_id: str,
-    result: Any,
-    trace: dict[str, Any],
-    *,
-    status: str = "completed",
-    errors: list[str] | None = None,
-) -> dict[str, Any]:
+def _agent_output(agent_id: str, result: Any, trace: dict[str, Any], *, status: str = "completed", errors: list[str] | None = None) -> dict[str, Any]:
     return AgentOutput(
         agent_id=agent_id,
         status=status,
@@ -187,32 +178,17 @@ async def _execute_task(task: ExecutionTask, task_id: str, semaphore: asyncio.Se
         started = time.perf_counter()
         logger.info(
             "workflow.task.start task_id=%s execution_task_id=%s agent=%s parallel_group=%s",
-            task_id,
-            task.task_id,
-            task.agent,
-            task.parallel_group,
+            task_id, task.task_id, task.agent, task.parallel_group,
         )
         try:
             result, trace = await _invoke(
-                _runtime_for(task.agent)(),
-                task.query,
-                task.agent,
-                task_id,
-                parent_agent_id="supervisor",
+                _runtime_for(task.agent)(), task.query, task.agent, task_id, parent_agent_id="supervisor"
             )
             output = _agent_output(task.agent, result, trace)
-            delegation = _delegation(
-                task_id,
-                task,
-                "completed",
-                elapsed_ms=(time.perf_counter() - started) * 1000,
-            )
+            delegation = _delegation(task_id, task, "completed", elapsed_ms=(time.perf_counter() - started) * 1000)
             logger.info(
                 "workflow.task.completed task_id=%s execution_task_id=%s agent=%s elapsed_ms=%.1f",
-                task_id,
-                task.task_id,
-                task.agent,
-                (time.perf_counter() - started) * 1000,
+                task_id, task.task_id, task.agent, (time.perf_counter() - started) * 1000,
             )
             return output, delegation
         except asyncio.CancelledError:
@@ -226,18 +202,11 @@ async def _execute_task(task: ExecutionTask, task_id: str, semaphore: asyncio.Se
                 errors=[str(exc)],
             )
             delegation = _delegation(
-                task_id,
-                task,
-                "failed",
-                elapsed_ms=(time.perf_counter() - started) * 1000,
-                error=str(exc),
+                task_id, task, "failed", elapsed_ms=(time.perf_counter() - started) * 1000, error=str(exc)
             )
             logger.exception(
                 "workflow.task.failed task_id=%s execution_task_id=%s agent=%s error_type=%s",
-                task_id,
-                task.task_id,
-                task.agent,
-                type(exc).__name__,
+                task_id, task.task_id, task.agent, type(exc).__name__,
             )
             return output, delegation
 
@@ -267,49 +236,66 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
         plan = extract_execution_plan(result)
         logger.info(
             "workflow.supervisor.plan.completed task_id=%s tasks=%d elapsed_ms=%.1f",
-            task_id,
-            len(plan.tasks),
-            (time.perf_counter() - started) * 1000,
+            task_id, len(plan.tasks), (time.perf_counter() - started) * 1000,
         )
-        delegations = [
-            _delegation(task_id, task, "planned")
-            for task in plan.tasks
-        ]
         return {
             "execution_plan": plan.model_dump(),
             "supervisor_result": result,
             "traces": [trace],
-            "delegations": delegations,
+            "delegations": [_delegation(task_id, task, "planned") for task in plan.tasks],
             "replan_count": state.get("replan_count", 0),
             "status": "planned",
         }
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.exception("workflow.supervisor.plan.failed task_id=%s error_type=%s", task_id, type(exc).__name__)
+        logger.exception(
+            "workflow.supervisor.plan.failed task_id=%s error_type=%s",
+            task_id, type(exc).__name__,
+        )
+        # Do not emit an invalid/empty ExecutionPlan. The graph router will send
+        # this state directly to Report so a planner failure cannot crash
+        # execute_plan_node with Pydantic's "tasks field required" error.
         return {
             "status": "partial",
             "errors": [f"supervisor planning: {exc}"],
             "traces": [{"agent_id": "supervisor", "status": "failed", "error": str(exc)}],
+            "replan_count": state.get("replan_count", 0),
         }
 
 
+def _has_execution_plan(state: AgentState) -> bool:
+    value = state.get("execution_plan")
+    if not isinstance(value, dict) or not value.get("tasks"):
+        logger.warning(
+            "workflow.execution_plan.missing task_id=%s status=%s",
+            state.get("task_id", "-"), state.get("status", "unknown"),
+        )
+        return False
+    try:
+        ExecutionPlan.model_validate(value)
+    except Exception as exc:
+        logger.warning(
+            "workflow.execution_plan.invalid task_id=%s error_type=%s",
+            state.get("task_id", "-"), type(exc).__name__,
+        )
+        return False
+    return True
+
+
+def _route_after_supervisor(state: AgentState) -> str:
+    return "execute_plan" if _has_execution_plan(state) else "report"
+
+
 async def execute_plan_node(state: AgentState) -> dict[str, Any]:
-    plan = ExecutionPlan.model_validate(state.get("execution_plan", {}))
+    plan = ExecutionPlan.model_validate(state["execution_plan"])
     task_id = state["task_id"]
     semaphore = asyncio.Semaphore(MAX_PARALLEL_AGENTS)
     logger.info(
         "workflow.parallel.start task_id=%s tasks=%d max_parallel=%d",
-        task_id,
-        len(plan.tasks),
-        MAX_PARALLEL_AGENTS,
+        task_id, len(plan.tasks), MAX_PARALLEL_AGENTS,
     )
-
-    # The LangGraph execution boundary owns this parallel wave. Each task is an
-    # independent AgentInput/AgentOutput unit and is bounded by MAX_PARALLEL_AGENTS.
-    results = await asyncio.gather(
-        *[_execute_task(task, task_id, semaphore) for task in plan.tasks]
-    )
+    results = await asyncio.gather(*[_execute_task(task, task_id, semaphore) for task in plan.tasks])
     outputs = [item[0] for item in results]
     delegations = [item[1] for item in results]
     traces = [trace for output in outputs for trace in output.get("traces", [])]
@@ -333,20 +319,15 @@ async def aggregate_node(state: AgentState) -> dict[str, Any]:
     context = aggregate_agent_outputs(state.get("agent_outputs", []))
     logger.info(
         "workflow.aggregate.completed task_id=%s successful=%d partial=%d failed=%d sources=%d",
-        state["task_id"],
-        len(context["successful_results"]),
-        len(context["partial_results"]),
-        len(context["failed_results"]),
-        len(context["sources"]),
+        state["task_id"], len(context["successful_results"]), len(context["partial_results"]),
+        len(context["failed_results"]), len(context["sources"]),
     )
     return {"aggregated_context": context}
 
 
 def _needs_replan(state: AgentState) -> str:
     context = state.get("aggregated_context", {})
-    failed = bool(context.get("failed_results"))
-    count = int(state.get("replan_count", 0))
-    if failed and count < MAX_REPLAN_ROUNDS:
+    if bool(context.get("failed_results")) and int(state.get("replan_count", 0)) < MAX_REPLAN_ROUNDS:
         return "replan"
     return "report"
 
@@ -358,6 +339,10 @@ async def replan_node(state: AgentState) -> dict[str, Any]:
     result["replan_count"] = next_count
     logger.info("workflow.supervisor.replan.completed task_id=%s round=%d", state["task_id"], next_count)
     return result
+
+
+def _route_after_replan(state: AgentState) -> str:
+    return "execute_plan" if _has_execution_plan(state) else "report"
 
 
 async def report_node(state: AgentState) -> dict[str, Any]:
@@ -373,18 +358,10 @@ async def report_node(state: AgentState) -> dict[str, Any]:
     logger.info("workflow.report.start task_id=%s context_length=%d", task_id, len(str(context)))
     try:
         result, trace = await _invoke(
-            create_report_agent(),
-            str(context),
-            "report",
-            task_id,
-            parent_agent_id="supervisor",
+            create_report_agent(), str(context), "report", task_id, parent_agent_id="supervisor"
         )
         output = _agent_output("report", result, trace)
-        logger.info(
-            "workflow.report.completed task_id=%s elapsed_ms=%.1f",
-            task_id,
-            (time.perf_counter() - started) * 1000,
-        )
+        logger.info("workflow.report.completed task_id=%s elapsed_ms=%.1f", task_id, (time.perf_counter() - started) * 1000)
         return {
             "report": result,
             "status": "completed" if not state.get("errors") else "partial",
@@ -399,15 +376,10 @@ async def report_node(state: AgentState) -> dict[str, Any]:
             "status": "partial",
             "errors": [f"report: {exc}"],
             "traces": [{"agent_id": "report", "status": "failed", "error": str(exc)}],
-            "agent_outputs": [
-                _agent_output(
-                    "report",
-                    None,
-                    {"agent_id": "report", "status": "failed", "error": str(exc)},
-                    status="failed",
-                    errors=[str(exc)],
-                )
-            ],
+            "agent_outputs": [_agent_output(
+                "report", None, {"agent_id": "report", "status": "failed", "error": str(exc)},
+                status="failed", errors=[str(exc)],
+            )],
         }
 
 
@@ -421,21 +393,26 @@ def build_workflow():
     graph.add_node("replan", replan_node)
     graph.add_node("report", report_node)
     graph.add_edge(START, "supervisor")
-    graph.add_edge("supervisor", "execute_plan")
-    graph.add_edge("execute_plan", "aggregate")
+    # A planner failure is a recoverable workflow state, not an execution-plan
+    # validation error. Route it to report instead of invoking execute_plan.
     graph.add_conditional_edges(
-        "aggregate",
-        _needs_replan,
-        {"replan": "replan", "report": "report"},
+        "supervisor",
+        _route_after_supervisor,
+        {"execute_plan": "execute_plan", "report": "report"},
     )
-    graph.add_edge("replan", "execute_plan")
+    graph.add_edge("execute_plan", "aggregate")
+    graph.add_conditional_edges("aggregate", _needs_replan, {"replan": "replan", "report": "report"})
+    graph.add_conditional_edges(
+        "replan",
+        _route_after_replan,
+        {"execute_plan": "execute_plan", "report": "report"},
+    )
     graph.add_edge("report", END)
     checkpointer = InMemorySaver() if settings.environment == "test" else get_checkpointer()
     workflow = graph.compile(checkpointer=checkpointer)
     logger.info(
         "workflow.build.completed elapsed_ms=%.1f checkpointer=%s",
-        (time.perf_counter() - started) * 1000,
-        type(checkpointer).__name__,
+        (time.perf_counter() - started) * 1000, type(checkpointer).__name__,
     )
     return workflow
 
