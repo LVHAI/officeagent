@@ -28,10 +28,35 @@ class SkillRegistry:
         self._skills[skill.name] = skill
 
     def get(self, name: str) -> Skill:
+        normalized = self.resolve_name(name)
         try:
-            return self._skills[name]
+            return self._skills[normalized]
         except KeyError as exc:
-            raise KeyError(f"Unknown skill: {name}") from exc
+            available = ", ".join(sorted(self._skills)) or "<none>"
+            raise KeyError(f"Unknown skill: {name}; available skills: {available}") from exc
+
+    def resolve_name(self, name: str) -> str:
+        """Resolve only deterministic aliases to prevent model-generated skill IDs from breaking routing."""
+        candidate = name.strip().lower()
+        if candidate in self._skills:
+            return candidate
+
+        aliases: dict[str, str] = {}
+        for skill in self._skills.values():
+            canonical = skill.name.lower()
+            aliases[canonical] = skill.name
+            aliases[f"{canonical}_skill"] = skill.name
+            if skill.path is not None:
+                aliases[skill.path.parent.name.lower()] = skill.name
+
+        # Backward-compatible domain alias used by earlier CRM Skill prompts.
+        if "crm" in self._skills:
+            aliases["crm_customer_info_skill"] = self._skills["crm"].name
+
+        resolved = aliases.get(candidate)
+        if resolved is not None:
+            return resolved
+        return name
 
     def all(self) -> list[Skill]:
         return list(self._skills.values())
@@ -176,12 +201,14 @@ def build_skill_runtime_tools(
 
         return await client.call(tool_name, arguments)
 
+    available_skills = ", ".join(sorted(skill.name for skill in registry.all())) or "<none>"
     return [
         StructuredTool.from_function(
             coroutine=discover_skill_mcp_tools,
             name="discover_skill_mcp_tools",
             description=(
                 "Discover MCP tool schemas only for the selected Skill. "
+                f"Use only canonical Skill names: {available_skills}. "
                 "Select a Skill first and call this before MCP invocation."
             ),
         ),
@@ -190,6 +217,7 @@ def build_skill_runtime_tools(
             name="invoke_skill_mcp_tool",
             description=(
                 "Invoke one MCP tool explicitly authorized by the selected Skill. "
+                f"Use only canonical Skill names: {available_skills}. "
                 "The concrete MCP tool is never registered in the Agent context."
             ),
         ),
