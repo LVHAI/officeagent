@@ -8,7 +8,7 @@ from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
 from langchain_core.tools import StructuredTool
 
-from app.agents.execution_plan import ExecutionPlan
+from app.agents.execution_plan import ExecutionPlan, ExecutionPlanInput
 from app.agents.model import build_chat_model
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,11 @@ agent, MCP tool, RAG retrieval, or web search yourself.
 
 You MUST call submit_execution_plan exactly once. Create the minimum plan that can
 answer the user's request.
+
+The submit_execution_plan function is the authoritative structured function-calling
+interface. Always provide every task as structured arguments. For optional fields,
+prefer omitting them rather than emitting null. Never invent database fields, product
+names, or facts not present in the user request or available context.
 
 Routing rules:
 - Internal knowledge, manuals, policies, FAQs, recipes, product documentation and
@@ -39,20 +44,21 @@ Routing rules:
 """.strip()
 
 
-def submit_execution_plan(tasks: list[dict[str, Any]], rationale: str = "") -> str:
-    """Validate and accept the Supervisor's execution plan."""
-    plan = ExecutionPlan(tasks=tasks, rationale=rationale)
-    return plan.model_dump_json()
+def submit_execution_plan(plan: ExecutionPlanInput) -> str:
+    """Function-calling entry point with an explicit Pydantic argument schema."""
+    normalized = plan.to_execution_plan()
+    return normalized.model_dump_json()
 
 
 PLAN_TOOL = StructuredTool.from_function(
     func=submit_execution_plan,
     name="submit_execution_plan",
     description=(
-        "Submit exactly one validated execution plan. Each task must contain task_id, "
-        "agent (knowledge-agent, tool-agent, or web-agent), query, optional depends_on, "
-        "parallel_group, and constraints."
+        "Submit exactly one validated execution plan for LangGraph. The function "
+        "argument is a structured ExecutionPlanInput. Use agent values knowledge-agent, "
+        "tool-agent, or web-agent. Omit optional fields when not needed."
     ),
+    args_schema=ExecutionPlanInput,
 )
 
 
@@ -93,7 +99,6 @@ def _tool_message_plan(message: Any) -> dict[str, Any] | None:
     name = _message_value(message, "name") or _message_value(message, "tool_name")
     if name != "submit_execution_plan":
         return None
-
     content = _message_value(message, "content")
     if isinstance(content, dict):
         return content
@@ -107,30 +112,23 @@ def _tool_message_plan(message: Any) -> dict[str, Any] | None:
 
 
 def _normalize_plan(value: dict[str, Any]) -> ExecutionPlan:
-    """Validate and canonicalize a plan before comparing representations."""
+    """Validate and canonicalize a function-call result."""
     return ExecutionPlan.model_validate(value)
 
 
 def extract_execution_plan(result: Any) -> ExecutionPlan:
-    """Extract the validated plan from DeepAgents/LangChain tool-call messages.
-
-    LangGraph/DeepAgents can expose the same StructuredTool execution through both
-    the AI tool-call message and the resulting ToolMessage. Those two representations
-    are not necessarily byte-for-byte identical: omitted Pydantic defaults may appear
-    in the executed tool result. Compare canonical ExecutionPlan models instead of
-    raw dictionaries, so representation differences are not mistaken for two plans.
-    """
+    """Extract and canonicalize the planner's structured function call."""
     messages = result.get("messages", []) if isinstance(result, dict) else []
     submitted: list[ExecutionPlan] = []
 
     for message in messages:
-        if isinstance(message, dict):
-            tool_calls = message.get("tool_calls", [])
-        else:
-            tool_calls = getattr(message, "tool_calls", [])
+        tool_calls = (
+            message.get("tool_calls", [])
+            if isinstance(message, dict)
+            else getattr(message, "tool_calls", [])
+        )
         for call in tool_calls or []:
-            name = _message_value(call, "name")
-            if name == "submit_execution_plan":
+            if _message_value(call, "name") == "submit_execution_plan":
                 submitted.append(_normalize_plan(_tool_call_args(call)))
 
         tool_plan = _tool_message_plan(message)
@@ -147,8 +145,7 @@ def extract_execution_plan(result: Any) -> ExecutionPlan:
     if any(plan.model_dump(mode="json") != canonical for plan in submitted[1:]):
         logger.error(
             "supervisor.plan.conflict count=%d plans=%s",
-            len(submitted),
-            [plan.model_dump(mode="json") for plan in submitted],
+            len(submitted), [plan.model_dump(mode="json") for plan in submitted],
         )
         raise ValueError(
             "Supervisor submitted multiple different execution plans; refusing to choose silently"
