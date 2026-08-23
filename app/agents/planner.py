@@ -7,9 +7,8 @@ from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field, field_validator
 
-from app.agents.execution_plan import ExecutionPlan
+from app.agents.execution_plan import ExecutionPlan, ExecutionPlanInput
 from app.agents.model import build_chat_model
 
 logger = logging.getLogger(__name__)
@@ -25,9 +24,10 @@ answer the user's request. Do NOT add a specialist merely because the final task
 an analysis or synthesis task.
 
 The submit_execution_plan function is the authoritative structured function-calling
-interface. Use ONLY these agent values: knowledge-agent, tool-agent, web-agent.
-NEVER emit general-purpose, general-purpose-agent, knowledge, tool, web, or any other
-agent name. For optional fields, prefer omitting them rather than emitting null.
+interface. Its schema is strict. Use ONLY these agent values: knowledge-agent,
+tool-agent, web-agent. NEVER emit aliases such as knowledge, knowledge_agent, tool,
+tool_agent, web, web_agent, general-purpose, or general-purpose-agent.
+For optional fields, prefer omitting them rather than emitting null.
 Never invent database fields, product names, or facts not present in the user request
 or available context.
 
@@ -59,57 +59,13 @@ The final decision about which child agents to call belongs to you. Do not rely 
 Python keyword router or deterministic post-processing to rewrite a valid plan.
 """.strip()
 
-_AGENT_ALIASES = {
-    "knowledge": "knowledge-agent",
-    "knowledge_agent": "knowledge-agent",
-    "knowledge-agent": "knowledge-agent",
-    "tool": "tool-agent",
-    "tool_agent": "tool-agent",
-    "tool-agent": "tool-agent",
-    "general-purpose": "tool-agent",
-    "general_purpose": "tool-agent",
-    "general-purpose-agent": "tool-agent",
-    "web": "web-agent",
-    "web_agent": "web-agent",
-    "web-agent": "web-agent",
-}
-
-
-def _normalize_agent_alias(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    return _AGENT_ALIASES.get(value, value)
-
-
-class PlannerTaskInput(BaseModel):
-    """Model-facing schema tolerant of known LLM routing aliases."""
-
-    task_id: str = Field(min_length=1)
-    agent: str
-    query: str = Field(min_length=1)
-    depends_on: list[str] | None = None
-    parallel_group: str | None = None
-    constraints: dict[str, object] | None = None
-
-    @field_validator("agent", mode="before")
-    @classmethod
-    def normalize_agent(cls, value: Any) -> Any:
-        return _normalize_agent_alias(value)
-
-
-class PlannerInput(BaseModel):
-    """Function-calling schema; canonical validation happens before execution."""
-
-    tasks: list[PlannerTaskInput] = Field(min_length=1, max_length=12)
-    rationale: str | None = None
-
 
 def submit_execution_plan(
     tasks: list[dict[str, Any]], rationale: str | None = None
 ) -> str:
-    """Function-calling entry point with canonical ExecutionPlan validation."""
-    payload = PlannerInput(tasks=tasks, rationale=rationale)
-    plan = ExecutionPlan.model_validate(payload.model_dump())
+    """Function-calling entry point with the strict canonical plan schema."""
+    payload = ExecutionPlanInput(tasks=tasks, rationale=rationale)
+    plan = payload.to_execution_plan()
     return plan.model_dump_json()
 
 
@@ -117,10 +73,10 @@ PLAN_TOOL = StructuredTool.from_function(
     func=submit_execution_plan,
     name="submit_execution_plan",
     description=(
-        "Submit exactly one validated execution plan. Each task should use "
-        "knowledge-agent, tool-agent, or web-agent."
+        "Submit exactly one validated execution plan. Each task MUST use one of "
+        "the exact agent values knowledge-agent, tool-agent, or web-agent."
     ),
-    args_schema=PlannerInput,
+    args_schema=ExecutionPlanInput,
 )
 
 
@@ -178,19 +134,8 @@ def _tool_message_plan(message: Any) -> dict[str, Any] | None:
 
 
 def _normalize_tool_call(value: dict[str, Any]) -> dict[str, Any]:
-    """Normalize known LLM aliases before strict ExecutionPlan validation."""
-    normalized = dict(value)
-    tasks = normalized.get("tasks")
-    if isinstance(tasks, list):
-        normalized["tasks"] = [
-            {
-                **task,
-                "agent": _normalize_agent_alias(task.get("agent")),
-            }
-            if isinstance(task, dict) else task
-            for task in tasks
-        ]
-    return normalized
+    """Validate a tool call without rewriting the Supervisor's agent selection."""
+    return dict(value)
 
 
 def _normalize_plan(value: dict[str, Any]) -> ExecutionPlan:
