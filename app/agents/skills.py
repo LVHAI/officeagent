@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from langchain_core.tools import StructuredTool
+from pydantic import create_model
 
 from app.agents.mcp_client import MCPClient, MCPTool
 
@@ -40,6 +41,12 @@ class SkillRegistry:
 
     def all(self) -> list[Skill]:
         return list(self._skills.values())
+
+    def canonical_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._skills))
+
+    def authorized_tool_names(self) -> tuple[str, ...]:
+        return tuple(sorted({name for skill in self._skills.values() for name in skill.tool_names}))
 
     def select_tools(self, skill_name: str, tools: list[MCPTool]) -> list[MCPTool]:
         allowed = set(self.get(skill_name).tool_names)
@@ -119,6 +126,13 @@ def _parse_list(value: str) -> list[str]:
     return [item.strip().strip("'\"") for item in value.split(",") if item.strip()]
 
 
+def _literal_type(values: tuple[str, ...]) -> Any:
+    """Build a Pydantic-compatible Literal type from registry values."""
+    if not values:
+        return str
+    return Literal.__getitem__(values)
+
+
 async def discover_skill_tools(
     client: MCPClient,
     registry: SkillRegistry,
@@ -146,6 +160,19 @@ def build_skill_runtime_tools(
     get_client: Callable[[str], MCPClient],
 ) -> list[StructuredTool]:
     """Only expose Skill runtime operations; concrete MCP tools never enter Agent Context."""
+
+    canonical_skills = registry.canonical_names()
+    authorized_tools = registry.authorized_tool_names()
+    skill_type = _literal_type(canonical_skills)
+    tool_type = _literal_type(authorized_tools)
+
+    DiscoverArgs = create_model("DiscoverSkillMCPToolsArgs", skill_name=(skill_type, ...))
+    InvokeArgs = create_model(
+        "InvokeSkillMCPToolArgs",
+        skill_name=(skill_type, ...),
+        tool_name=(tool_type, ...),
+        arguments=(dict[str, Any], ...),
+    )
 
     async def discover_skill_mcp_tools(skill_name: str) -> list[dict[str, Any]]:
         skill = registry.get(skill_name)
@@ -181,27 +208,31 @@ def build_skill_runtime_tools(
 
         return await client.call(tool_name, arguments)
 
-    available_skills = ", ".join(sorted(skill.name for skill in registry.all())) or "<none>"
+    available_skills = ", ".join(canonical_skills) or "<none>"
+    available_tools = ", ".join(authorized_tools) or "<none>"
     return [
         StructuredTool.from_function(
             coroutine=discover_skill_mcp_tools,
             name="discover_skill_mcp_tools",
             description=(
                 "Discover MCP tool schemas only for the selected Skill. "
-                f"Use only canonical Skill names: {available_skills}. "
+                f"Canonical Skill names are: {available_skills}. "
                 "The Skill name must exactly match a registered Skill; do not invent aliases. "
                 "Select a Skill first and call this before MCP invocation."
             ),
+            args_schema=DiscoverArgs,
         ),
         StructuredTool.from_function(
             coroutine=invoke_skill_mcp_tool,
             name="invoke_skill_mcp_tool",
             description=(
                 "Invoke one MCP tool explicitly authorized by the selected Skill. "
-                f"Use only canonical Skill names: {available_skills}. "
-                "The Skill name must exactly match a registered Skill; do not invent aliases. "
-                "The concrete MCP tool is never registered in the Agent context."
+                f"Canonical Skill names are: {available_skills}. "
+                f"Authorized MCP tool names are: {available_tools}. "
+                "The Skill name and tool name must exactly match registered values; do not invent names. "
+                "Call discover_skill_mcp_tools first and invoke only a discovered, Skill-authorized tool."
             ),
+            args_schema=InvokeArgs,
         ),
     ]
 
