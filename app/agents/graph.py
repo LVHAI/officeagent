@@ -56,6 +56,17 @@ async def _log_agent_progress(task: asyncio.Task, task_id: str, agent_id: str, s
         raise
 
 
+def _agent_input_log(task_id: str, agent_id: str, parent_agent_id: str | None, query: str) -> dict[str, Any]:
+    """Build the exact input metadata passed to an Agent for diagnostic logging."""
+    return {
+        "task_id": task_id,
+        "agent": agent_id,
+        "parent": parent_agent_id or "-",
+        "input_length": len(query),
+        "input": query,
+    }
+
+
 def _task_query(query: str, dependency_results: dict[str, Any] | None = None) -> str:
     """Render explicit upstream evidence into the downstream Agent input."""
     if not dependency_results:
@@ -69,13 +80,14 @@ async def _invoke(agent: Any, query: str, agent_id: str, task_id: str, parent_ag
 
     async def invoke_once():
         attempt_started = time.perf_counter()
+        input_log = _agent_input_log(task_id, agent_id, parent_agent_id, query)
         logger.info(
             "agent.invoke.input task_id=%s agent=%s parent=%s input_length=%d input=%s",
-            task_id,
-            agent_id,
-            parent_agent_id or "-",
-            len(query),
-            query,
+            input_log["task_id"],
+            input_log["agent"],
+            input_log["parent"],
+            input_log["input_length"],
+            input_log["input"],
         )
         logger.info("agent.invoke.start task_id=%s agent=%s parent=%s input_length=%d agent_type=%s", task_id, agent_id, parent_agent_id or "-", len(query), type(agent).__name__)
         operation = asyncio.create_task(agent.ainvoke({"messages": [{"role": "user", "content": query}], "task_id": task_id}))
