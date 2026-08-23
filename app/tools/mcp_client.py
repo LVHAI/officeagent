@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.streamable_http import streamablehttp_client
 
 from app.core.retry import retry_async
 from app.core.trace import ToolSource
@@ -61,7 +61,7 @@ class MCPClient:
         # 每次建立独立会话，避免不同 Agent 之间共享连接造成状态污染。
         await self._before_call()
         try:
-            async with streamable_http_client(self.server.url) as (read, write, _):
+            async with streamablehttp_client(self.server.url) as (read, write, _):
                 async with ClientSession(read, write) as client:
                     await retry_async(
                         lambda: asyncio.wait_for(client.initialize(), timeout=self.server.timeout_seconds),
