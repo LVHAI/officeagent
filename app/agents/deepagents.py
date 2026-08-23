@@ -8,7 +8,7 @@ from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from langchain.agents import create_agent
-from langchain_core.tools import tool
+from langchain_core.tools import StructuredTool, tool
 from langchain_tavily import TavilySearch
 
 from app.agents.knowledge import knowledge_search
@@ -75,8 +75,8 @@ MCP access. First inspect the available Skill metadata and select exactly the Sk
 that best matches the user's intent. The canonical Skill names currently available
 are: {CANONICAL_SKILL_NAMES}. You MUST use one of these canonical names when calling
 Skill Runtime tools; do not invent descriptive Skill IDs such as
-"crm_customer_info_skill". If a natural-language Skill description suggests an
-alias, resolve it to the canonical Skill name first.
+"crm_customer_info_skill". If a natural-language Skill description suggests an alias,
+resolve it to the canonical Skill name first.
 
 The Skill Runtime is the authoritative way to load Skill instructions. Do NOT assume
 that the filesystem Skill mount has been read merely because `/skills/` is available.
@@ -111,10 +111,10 @@ Skill selection or invoke a concrete MCP tool directly.
 """.strip()
 
 WEB_PROMPT = """
-You are the Web Agent. Use Tavily only when current or external information is
-required. Filter search results, extract evidence, and preserve source URLs,
-titles, and retrieval timestamps. Do not use Web Search for internal Knowledge Base
-retrieval; that belongs to Knowledge Agent.
+You are the Web Agent. Use the web_search tool only when current or external
+information is required. Filter search results, extract evidence, and preserve
+source URLs, titles, and retrieval timestamps. Do not use Web Search for internal
+Knowledge Base retrieval; that belongs to Knowledge Agent.
 """.strip()
 
 REPORT_PROMPT = """
@@ -140,11 +140,42 @@ def submit_analysis_report(
 
 def build_tavily_search() -> Any:
     if not settings.tavily_api_key:
+        logger.warning("web.search.unavailable reason=tavily_api_key_missing")
         return None
-    return TavilySearch(
+
+    client = TavilySearch(
         max_results=5,
         topic="general",
         tavily_api_key=settings.tavily_api_key,
+    )
+
+    async def search(query: str) -> Any:
+        started = time.perf_counter()
+        logger.info("web.search.start query=%s", query)
+        try:
+            result = await client.ainvoke({"query": query})
+            result_count = len(result) if isinstance(result, list) else 1
+            logger.info(
+                "web.search.completed query=%s result_count=%d elapsed_ms=%.1f",
+                query,
+                result_count,
+                (time.perf_counter() - started) * 1000,
+            )
+            return result
+        except Exception as exc:
+            logger.exception(
+                "web.search.failed query=%s elapsed_ms=%.1f error_type=%s error=%s",
+                query,
+                (time.perf_counter() - started) * 1000,
+                type(exc).__name__,
+                exc,
+            )
+            raise
+
+    return StructuredTool.from_function(
+        coroutine=search,
+        name="web_search",
+        description="Search the current public web with Tavily and return source-aware results.",
     )
 
 
@@ -197,7 +228,7 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
             },
             {
                 "name": "web-agent",
-                "description": "Retrieve current external information with Tavily. Do not use for internal Knowledge Base data.",
+                "description": "Retrieve current external information with the web_search tool. Do not use for internal Knowledge Base data.",
                 "system_prompt": WEB_PROMPT,
                 "model": model,
                 "tools": external_tools,
