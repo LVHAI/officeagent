@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -8,6 +9,8 @@ from langchain_core.tools import StructuredTool
 from pydantic import create_model
 
 from app.agents.mcp_client import MCPClient, MCPTool
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -144,7 +147,6 @@ async def discover_skill_tools(
         return []
     definitions = await client.discover_tools()
     selected = registry.select_tools(skill_name, definitions)
-    logger = __import__("logging").getLogger(__name__)
     logger.info(
         "skill.mcp.discovery skill=%s server=%s discovered=%d selected=%d",
         skill.name,
@@ -174,12 +176,40 @@ def build_skill_runtime_tools(
         arguments=(dict[str, Any], ...),
     )
 
+    # Runtime tools are created per Tool Agent instance, so this cache is scoped to
+    # that agent/request lifecycle rather than shared globally between requests.
+    discovered_tools: dict[str, dict[str, MCPTool]] = {}
+
     async def discover_skill_mcp_tools(skill_name: str) -> list[dict[str, Any]]:
         skill = registry.get(skill_name)
         if not skill.mcp_server:
             return []
-        client = get_client(skill.mcp_server)
-        definitions = await discover_skill_tools(client, registry, skill_name)
+
+        cached = discovered_tools.get(skill_name)
+        if cached is not None:
+            logger.info(
+                "skill.mcp.discovery.cache_hit skill=%s server=%s selected=%d",
+                skill.name,
+                skill.mcp_server,
+                len(cached),
+            )
+            definitions = list(cached.values())
+        else:
+            client = get_client(skill.mcp_server)
+            logger.info(
+                "skill.mcp.discovery.start skill=%s server=%s",
+                skill.name,
+                skill.mcp_server,
+            )
+            definitions = await discover_skill_tools(client, registry, skill_name)
+            discovered_tools[skill_name] = {definition.name: definition for definition in definitions}
+            logger.info(
+                "skill.mcp.discovery.completed skill=%s server=%s selected=%d",
+                skill.name,
+                skill.mcp_server,
+                len(definitions),
+            )
+
         return [
             {
                 "name": definition.name,
@@ -200,13 +230,39 @@ def build_skill_runtime_tools(
         if tool_name not in skill.tool_names:
             raise ValueError(f"Tool {tool_name!r} is not allowed by Skill {skill_name!r}")
 
-        client = get_client(skill.mcp_server)
-        definitions = await discover_skill_tools(client, registry, skill_name)
-        definition_names = {definition.name for definition in definitions}
-        if tool_name not in definition_names:
+        definitions = discovered_tools.get(skill_name)
+        if definitions is None:
+            raise ValueError(
+                f"Skill {skill_name!r} has not been discovered; call discover_skill_mcp_tools first"
+            )
+        definition = definitions.get(tool_name)
+        if definition is None:
             raise ValueError(f"MCP tool {tool_name!r} was not discovered for Skill {skill_name!r}")
 
-        return await client.call(tool_name, arguments)
+        client = get_client(skill.mcp_server)
+        logger.info(
+            "skill.mcp.invoke.start skill=%s server=%s tool=%s",
+            skill.name,
+            skill.mcp_server,
+            definition.name,
+        )
+        try:
+            result = await client.call(definition.name, arguments)
+        except Exception:
+            logger.exception(
+                "skill.mcp.invoke.failed skill=%s server=%s tool=%s",
+                skill.name,
+                skill.mcp_server,
+                definition.name,
+            )
+            raise
+        logger.info(
+            "skill.mcp.invoke.completed skill=%s server=%s tool=%s",
+            skill.name,
+            skill.mcp_server,
+            definition.name,
+        )
+        return result
 
     available_skills = ", ".join(canonical_skills) or "<none>"
     available_tools = ", ".join(authorized_tools) or "<none>"
