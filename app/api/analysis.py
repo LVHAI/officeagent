@@ -13,6 +13,7 @@ from app.agents.graph import GLOBAL_TIMEOUT_SECONDS, build_workflow
 from app.core.config import settings
 from app.core.execution import run_with_timeout
 from app.core.postgres_store import PostgresTaskStore
+from app.core.redis_state import get_redis_task_coordinator
 from app.core.task_store import InMemoryTaskStore, TaskRecord, TaskStore
 
 logger = logging.getLogger(__name__)
@@ -78,10 +79,25 @@ async def _get(task_id: str) -> TaskRecord | None:
     return await to_thread(_task_store.get, task_id)
 
 
+async def _set_redis_status(task_id: str, status: str) -> None:
+    """Redis is coordination/cache only; persistence remains PostgreSQL."""
+    try:
+        await get_redis_task_coordinator().set_status(task_id, status)
+    except Exception as exc:
+        logger.warning(
+            "analysis.redis_status.failed task_id=%s status=%s error_type=%s error=%s",
+            task_id,
+            status,
+            type(exc).__name__,
+            exc,
+        )
+
+
 async def run_analysis(query: str) -> dict:
     task_id = str(uuid4())
     request_started = time.perf_counter()
     logger.info("analysis.start task_id=%s query_length=%d", task_id, len(query))
+    await _set_redis_status(task_id, "running")
     await _save(TaskRecord(task_id=task_id, status="running"))
     try:
         logger.info(
@@ -132,6 +148,7 @@ async def run_analysis(query: str) -> dict:
                 result=response,
             )
         )
+        await _set_redis_status(task_id, response["status"])
         logger.info(
             "analysis.completed task_id=%s status=%s total_elapsed_ms=%.1f",
             task_id,
@@ -146,6 +163,7 @@ async def run_analysis(query: str) -> dict:
             GLOBAL_TIMEOUT_SECONDS,
             (time.perf_counter() - request_started) * 1000,
         )
+        await _set_redis_status(task_id, "failed")
         await _save(
             TaskRecord(
                 task_id=task_id,
@@ -166,6 +184,7 @@ async def run_analysis(query: str) -> dict:
             (time.perf_counter() - request_started) * 1000,
             exc,
         )
+        await _set_redis_status(task_id, "failed")
         await _save(TaskRecord(task_id=task_id, status="failed", error=str(exc)))
         raise
 
