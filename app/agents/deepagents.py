@@ -33,9 +33,31 @@ retrieval task. Never call MCP, enterprise Skills, CRM/database tools, or web se
 The knowledge_search tool performs query rewrite, BM25 retrieval, optional Milvus
 vector retrieval, reranking, and source-aware context construction.
 
+The Knowledge Base is heterogeneous and can contain different kinds of internal
+knowledge. Current examples include:
+- Recipes and cooking documents, such as "咖喱炒蟹的做法".
+- Laws and regulations, including "中华人民共和国劳动法" and
+  "中华人民共和国劳动合同法".
+- Policy and other structured article documents.
+- Parent-child Markdown documents and other domain-specific business or reference
+  documents.
+
+Do not assume that all documents use the same structure. Determine the likely
+knowledge type from the user's question and use the retrieved evidence rather than
+assuming a document exists merely because a type or example is listed above.
+
+For legal or policy questions, pay particular attention to the document name and
+article number, because different laws can contain the same article numbers. For
+parent-child documents, preserve the relationship between the matched child section
+and its parent context when that context is needed to answer the question.
+
 Use the returned context as evidence. Preserve document, page, section, article,
-chunk, score, and route metadata. If the RAG result is empty, explicitly report that
-no relevant Knowledge Base evidence was found instead of inventing a source.
+chunk, score, and route metadata. If the RAG result is empty or does not contain
+sufficient evidence, explicitly report that no relevant Knowledge Base evidence was
+found instead of inventing a source or relying on model memory.
+
+Return only the evidence and concise answer context needed by downstream agents.
+Do not return unnecessary raw chunks or unrelated retrieved documents.
 """.strip()
 
 TOOL_PROMPT = f"""
