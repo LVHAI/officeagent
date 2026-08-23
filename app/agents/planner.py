@@ -44,9 +44,17 @@ Routing rules:
 """.strip()
 
 
-def submit_execution_plan(plan: ExecutionPlanInput) -> str:
-    """Function-calling entry point with an explicit Pydantic argument schema."""
-    normalized = plan.to_execution_plan()
+def submit_execution_plan(
+    tasks: list[dict[str, Any]], rationale: str = ""
+) -> str:
+    """Function-calling entry point.
+
+    StructuredTool supplies validated keyword arguments from the model's function call,
+    so this callable deliberately keeps the concrete keyword signature. The explicit
+    Pydantic schema is attached to PLAN_TOOL for the model-facing contract.
+    """
+    payload = ExecutionPlanInput(tasks=tasks, rationale=rationale)
+    normalized = payload.to_execution_plan()
     return normalized.model_dump_json()
 
 
@@ -54,9 +62,10 @@ PLAN_TOOL = StructuredTool.from_function(
     func=submit_execution_plan,
     name="submit_execution_plan",
     description=(
-        "Submit exactly one validated execution plan for LangGraph. The function "
-        "argument is a structured ExecutionPlanInput. Use agent values knowledge-agent, "
-        "tool-agent, or web-agent. Omit optional fields when not needed."
+        "Submit exactly one validated execution plan. The arguments are structured as "
+        "tasks plus optional rationale. Each task contains task_id, agent, query, "
+        "optional depends_on, parallel_group, and constraints. Omit optional fields "
+        "when they are not needed."
     ),
     args_schema=ExecutionPlanInput,
 )
@@ -112,7 +121,6 @@ def _tool_message_plan(message: Any) -> dict[str, Any] | None:
 
 
 def _normalize_plan(value: dict[str, Any]) -> ExecutionPlan:
-    """Validate and canonicalize a function-call result."""
     return ExecutionPlan.model_validate(value)
 
 
