@@ -101,12 +101,34 @@ def _schema_model(tool: MCPTool):
     return create_model(f"{tool.name.replace('.', '_')}Args", **fields)
 
 
+def _log_tool_arguments(tool_name: str, arguments: dict[str, Any]) -> None:
+    """Log the concrete SQL for database queries without dumping all tool arguments."""
+    if tool_name != "sql_query":
+        return
+
+    sql = arguments.get("sql") or arguments.get("query")
+    if sql is None:
+        logger.warning(
+            "mcp.sql.query.missing_sql tool=%s argument_keys=%s",
+            tool_name,
+            sorted(arguments.keys()),
+        )
+        return
+
+    logger.info(
+        "mcp.sql.query tool=%s sql=%s",
+        tool_name,
+        str(sql).strip(),
+    )
+
+
 def build_langchain_tools(client: MCPClient, definitions: list[MCPTool]) -> list[StructuredTool]:
     result: list[StructuredTool] = []
     for definition in definitions:
         async def invoke(_definition=definition, **kwargs: Any):
             started = time.perf_counter()
             logger.info("mcp.tool.invoke.start tool=%s", _definition.name)
+            _log_tool_arguments(_definition.name, kwargs)
             try:
                 result = await client.call(_definition.name, kwargs)
                 logger.info(
