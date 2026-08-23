@@ -45,6 +45,26 @@ class MilvusVectorStore:
             for hit in hits
         ]
 
+    def delete_document(self, document: str) -> None:
+        """Delete every indexed chunk belonging to a document before re-indexing."""
+        if not document:
+            raise ValueError("document must not be empty")
+        escaped = document.replace('"', '\\"')
+        self.collection.delete(expr=f'document == "{escaped}"')
+
+    def replace_document(self, document: str, rows: list[dict[str, Any]]) -> Any:
+        """Atomically replace the application's view of a document's vector rows."""
+        if not document:
+            raise ValueError("document must not be empty")
+        if not rows:
+            self.delete_document(document)
+            return None
+        invalid = [row for row in rows if row.get("document") != document]
+        if invalid:
+            raise ValueError("all rows must belong to the document being replaced")
+        self.delete_document(document)
+        return self.collection.insert(rows)
+
 
 def create_milvus_collection_schema() -> list[dict[str, Any]]:
     """返回统一字段定义，实际 Collection 创建由基础设施初始化层完成。"""
