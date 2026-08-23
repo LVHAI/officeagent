@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TypeVar
 
 T = TypeVar("T")
@@ -15,10 +15,38 @@ async def run_with_timeout(operation: Awaitable[T], timeout: float) -> T:
     try:
         return await asyncio.wait_for(task, timeout=timeout)
     except asyncio.CancelledError:
-        # 外部取消必须继续取消底层 Task，避免 Agent/MCP 请求成为孤儿任务。
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         raise
+
+
+async def retry_async(
+    operation: Callable[[], Awaitable[T]],
+    *,
+    retries: int = 2,
+    base_delay: float = 0.25,
+    retryable: Callable[[Exception], bool] | None = None,
+) -> T:
+    """Retry transient async work without ever swallowing cancellation."""
+    if retries < 0:
+        raise ValueError("retries must be greater than or equal to zero")
+    if base_delay < 0:
+        raise ValueError("base_delay must be greater than or equal to zero")
+
+    last_error: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return await operation()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retries or (retryable is not None and not retryable(exc)):
+                raise
+            delay = base_delay * (2**attempt)
+            if delay:
+                await asyncio.sleep(delay)
+    raise RuntimeError("retry_async exhausted without a result") from last_error
 
 
 async def gather_bounded(
@@ -38,7 +66,6 @@ async def gather_bounded(
     try:
         return await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
-        # Supervisor / API 取消任务时，不能遗留等待 Semaphore 或 MCP 的后台 Worker。
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
