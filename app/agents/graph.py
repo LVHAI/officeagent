@@ -12,7 +12,6 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.contracts import DelegationTrace
 from app.agents.deepagents import create_report_agent, create_supervisor
-from app.agents.mcp_registry import mcp_registry
 from app.core.checkpoint import get_checkpointer
 from app.core.config import settings
 from app.core.execution import run_with_timeout
@@ -132,16 +131,6 @@ def _delegation(
     ).__dict__
 
 
-def _supervisor_tools() -> dict[str, list[Any]]:
-    """Expose only deterministic knowledge tools to the Supervisor runtime.
-
-    Enterprise MCP tools belong behind Tool Agent -> Skill Runtime -> MCP. They must
-    not be registered directly on the Supervisor, otherwise the context grows with
-    the enterprise tool catalog and bypasses the Skill boundary.
-    """
-    return {"knowledge": mcp_registry.tools("knowledge")}
-
-
 def _message_value(message: Any, key: str, default: Any = None) -> Any:
     if isinstance(message, dict):
         return message.get(key, default)
@@ -149,18 +138,7 @@ def _message_value(message: Any, key: str, default: Any = None) -> Any:
 
 
 def _extract_delegations(result: Any, task_id: str) -> list[dict[str, Any]]:
-    """Build delegation traces only from actual DeepAgents `task` tool calls.
-
-    The previous implementation searched the Supervisor's final natural-language
-    response for agent names. That could report a delegation even when no subagent
-    was called. DeepAgents exposes subagent execution through the `task` tool, so the
-    trace must be derived from those tool-call records instead.
-
-    The event is deliberately marked `delegated`, not `completed`: the current graph
-    boundary observes the Supervisor's tool-call history but does not yet receive a
-    child-agent lifecycle callback with an accurate duration. A future execution
-    event stream can upgrade this to completed/failed without changing the contract.
-    """
+    """Build delegation traces only from actual DeepAgents `task` tool calls."""
     messages = result.get("messages", []) if isinstance(result, dict) else getattr(result, "messages", [])
     delegations: list[dict[str, Any]] = []
     for message in messages or []:
@@ -173,14 +151,7 @@ def _extract_delegations(result: Any, task_id: str) -> list[dict[str, Any]]:
             if not child:
                 continue
             reason = str(args.get("description", "")).strip()
-            delegations.append(
-                _delegation(
-                    task_id,
-                    child,
-                    "delegated",
-                    reason=reason,
-                )
-            )
+            delegations.append(_delegation(task_id, child, "delegated", reason=reason))
     return delegations
 
 
@@ -189,14 +160,10 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     started = asyncio.get_running_loop().time()
     logger.info("workflow.supervisor.start task_id=%s query_length=%d", task_id, len(state["query"]))
     try:
-        tools = _supervisor_tools()
-        logger.info(
-            "workflow.supervisor.tools task_id=%s knowledge=%d enterprise=skill_runtime",
-            task_id,
-            len(tools["knowledge"]),
-        )
+        # Knowledge retrieval is a direct RAG capability of Knowledge Agent.
+        # No knowledge MCP tools are registered with Supervisor or Tool Agent.
         result, trace = await _invoke(
-            create_supervisor(knowledge_tools=tools["knowledge"]),
+            create_supervisor(),
             state["query"],
             "supervisor",
             task_id,
