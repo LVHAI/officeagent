@@ -7,8 +7,9 @@ from typing import Any
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend
 from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field, field_validator
 
-from app.agents.execution_plan import ExecutionPlan, ExecutionPlanInput
+from app.agents.execution_plan import ExecutionPlan
 from app.agents.model import build_chat_model
 
 logger = logging.getLogger(__name__)
@@ -46,24 +47,68 @@ Routing rules:
 """.strip()
 
 
+_AGENT_ALIASES = {
+    "knowledge": "knowledge-agent",
+    "knowledge_agent": "knowledge-agent",
+    "knowledge-agent": "knowledge-agent",
+    "tool": "tool-agent",
+    "tool_agent": "tool-agent",
+    "tool-agent": "tool-agent",
+    "general-purpose": "tool-agent",
+    "general_purpose": "tool-agent",
+    "general-purpose-agent": "tool-agent",
+    "web": "web-agent",
+    "web_agent": "web-agent",
+    "web-agent": "web-agent",
+}
+
+
+def _normalize_agent_alias(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return _AGENT_ALIASES.get(value, value)
+
+
+class PlannerTaskInput(BaseModel):
+    """Model-facing schema tolerant of known LLM routing aliases."""
+
+    task_id: str = Field(min_length=1)
+    agent: str
+    query: str = Field(min_length=1)
+    depends_on: list[str] | None = None
+    parallel_group: str | None = None
+    constraints: dict[str, object] | None = None
+
+    @field_validator("agent", mode="before")
+    @classmethod
+    def normalize_agent(cls, value: Any) -> Any:
+        return _normalize_agent_alias(value)
+
+
+class PlannerInput(BaseModel):
+    """Function-calling schema; canonical validation happens before execution."""
+
+    tasks: list[PlannerTaskInput] = Field(min_length=1, max_length=12)
+    rationale: str | None = None
+
+
 def submit_execution_plan(
-    tasks: list[dict[str, Any]], rationale: str = ""
+    tasks: list[dict[str, Any]], rationale: str | None = None
 ) -> str:
-    """Function-calling entry point with a concrete keyword signature."""
-    payload = ExecutionPlanInput(tasks=tasks, rationale=rationale)
-    normalized = payload.to_execution_plan()
-    return normalized.model_dump_json()
+    """Function-calling entry point with canonical ExecutionPlan validation."""
+    payload = PlannerInput(tasks=tasks, rationale=rationale)
+    plan = ExecutionPlan.model_validate(payload.model_dump())
+    return plan.model_dump_json()
 
 
 PLAN_TOOL = StructuredTool.from_function(
     func=submit_execution_plan,
     name="submit_execution_plan",
     description=(
-        "Submit exactly one validated execution plan. The arguments are structured as "
-        "tasks plus optional rationale. Each task MUST use one of knowledge-agent, "
-        "tool-agent, or web-agent."
+        "Submit exactly one validated execution plan. Each task should use "
+        "knowledge-agent, tool-agent, or web-agent."
     ),
-    args_schema=ExecutionPlanInput,
+    args_schema=PlannerInput,
 )
 
 
@@ -112,22 +157,6 @@ def _tool_message_plan(message: Any) -> dict[str, Any] | None:
             return None
         return value if isinstance(value, dict) else None
     return None
-
-
-def _normalize_agent_alias(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    return {
-        "knowledge": "knowledge-agent",
-        "knowledge_agent": "knowledge-agent",
-        "tool": "tool-agent",
-        "tool_agent": "tool-agent",
-        "general-purpose": "tool-agent",
-        "general_purpose": "tool-agent",
-        "general-purpose-agent": "tool-agent",
-        "web": "web-agent",
-        "web_agent": "web-agent",
-    }.get(value, value)
 
 
 def _normalize_tool_call(value: dict[str, Any]) -> dict[str, Any]:
