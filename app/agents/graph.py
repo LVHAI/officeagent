@@ -19,7 +19,11 @@ from app.agents.deepagents import (
     create_web_agent,
 )
 from app.agents.execution_plan import ExecutionPlan, ExecutionTask
-from app.agents.planner import create_execution_planner, extract_execution_plan
+from app.agents.planner import (
+    create_execution_planner,
+    extract_execution_plan,
+    validate_agent_selection,
+)
 from app.agents.scheduler import execute_with_dependencies
 from app.core.checkpoint import get_checkpointer
 from app.core.config import settings
@@ -234,6 +238,7 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
             task_id,
         )
         plan = extract_execution_plan(result)
+        plan = validate_agent_selection(state["query"], plan)
         logger.info(
             "workflow.supervisor.plan.completed task_id=%s tasks=%d elapsed_ms=%.1f",
             task_id, len(plan.tasks), (time.perf_counter() - started) * 1000,
@@ -358,71 +363,26 @@ async def report_node(state: AgentState) -> dict[str, Any]:
     logger.info("workflow.report.start task_id=%s context_length=%d", task_id, len(str(context)))
     try:
         result, trace = await _invoke(
-            create_report_agent(), str(context), "report", task_id, parent_agent_id="supervisor"
+            create_report_agent(),
+            str(context),
+            "report",
+            task_id,
+            parent_agent_id="supervisor",
         )
-        output = _agent_output("report", result, trace)
-        logger.info("workflow.report.completed task_id=%s elapsed_ms=%.1f", task_id, (time.perf_counter() - started) * 1000)
-        return {
-            "report": result,
-            "status": "completed" if not state.get("errors") else "partial",
-            "traces": [trace],
-            "agent_outputs": [output],
-        }
+        logger.info(
+            "workflow.report.completed task_id=%s elapsed_ms=%.1f",
+            task_id, (time.perf_counter() - started) * 1000,
+        )
+        return {"report": result, "traces": [trace], "status": "completed"}
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.exception("workflow.report.failed task_id=%s error_type=%s", task_id, type(exc).__name__)
+        logger.exception(
+            "workflow.report.failed task_id=%s error_type=%s",
+            task_id, type(exc).__name__,
+        )
         return {
             "status": "partial",
             "errors": [f"report: {exc}"],
             "traces": [{"agent_id": "report", "status": "failed", "error": str(exc)}],
-            "agent_outputs": [_agent_output(
-                "report", None, {"agent_id": "report", "status": "failed", "error": str(exc)},
-                status="failed", errors=[str(exc)],
-            )],
         }
-
-
-def build_workflow():
-    logger.info("workflow.build.start environment=%s", settings.environment)
-    started = time.perf_counter()
-    graph = StateGraph(AgentState)
-    graph.add_node("supervisor", supervisor_node)
-    graph.add_node("execute_plan", execute_plan_node)
-    graph.add_node("aggregate", aggregate_node)
-    graph.add_node("replan", replan_node)
-    graph.add_node("report", report_node)
-    graph.add_edge(START, "supervisor")
-    graph.add_conditional_edges(
-        "supervisor",
-        _route_after_supervisor,
-        {"execute_plan": "execute_plan", "report": "report"},
-    )
-    graph.add_edge("execute_plan", "aggregate")
-    graph.add_conditional_edges("aggregate", _needs_replan, {"replan": "replan", "report": "report"})
-    graph.add_conditional_edges(
-        "replan",
-        _route_after_replan,
-        {"execute_plan": "execute_plan", "report": "report"},
-    )
-    graph.add_edge("report", END)
-    checkpointer = InMemorySaver() if settings.environment == "test" else get_checkpointer()
-    workflow = graph.compile(checkpointer=checkpointer)
-    logger.info(
-        "workflow.build.completed elapsed_ms=%.1f checkpointer=%s",
-        (time.perf_counter() - started) * 1000,
-        type(checkpointer).__name__,
-    )
-    return workflow
-
-
-def new_task_state(query: str) -> AgentState:
-    return {
-        "query": query,
-        "task_id": str(uuid4()),
-        "errors": [],
-        "traces": [],
-        "delegations": [],
-        "agent_outputs": [],
-        "replan_count": 0,
-    }
