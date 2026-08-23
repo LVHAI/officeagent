@@ -1,3 +1,8 @@
+---
+name: report
+description: Executive-ready report aggregation from validated agent outputs.
+---
+
 # Report Generation
 
 Aggregate validated agent outputs into an executive-ready report.
