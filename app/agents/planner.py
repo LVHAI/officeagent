@@ -38,6 +38,15 @@ Routing rules:
 - Mixed requests may use multiple agents. Independent tasks should share a parallel
   group and omit dependencies. Only add dependencies when one task genuinely needs
   another task's result.
+- IMPORTANT: Knowledge Agent, Tool Agent, and Web Agent are independent specialist
+  branches by default. When a request needs two or more of them, run those branches
+  in parallel unless the user explicitly requires one specialist to consume another
+  specialist's intermediate result.
+- Do NOT use depends_on to represent the final synthesis or the phrase "combine",
+  "compare", "analyze together", or similar. Cross-agent synthesis belongs to the
+  Result Aggregator / Report Agent after the independent specialist branches finish.
+- A task that only provides evidence to the final report must have no dependency on
+  another specialist task.
 - Never select all agents by default.
 - The Tool Agent decides Skill -> MCP internally; do not mention or invent MCP tool
   names in the plan.
