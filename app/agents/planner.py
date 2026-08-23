@@ -68,6 +68,12 @@ class _PlannerAgent:
         return await self._agent.ainvoke(request)
 
 
+def create_execution_planner() -> _PlannerAgent:
+    """Create a fresh planner instance for one workflow invocation."""
+    logger.info("agent.create supervisor-planner model=deepagent")
+    return _PlannerAgent()
+
+
 def _tool_call_args(call: Any) -> dict[str, Any]:
     if isinstance(call, dict):
         args = call.get("args", {})
