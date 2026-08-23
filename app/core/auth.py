@@ -30,8 +30,7 @@ def verify_password(password: str, encoded: str) -> bool:
         algorithm, rounds, salt_hex, _digest_hex = encoded.split("$", 3)
         if algorithm != "pbkdf2_sha256" or int(rounds) != 310_000:
             return False
-        expected = _hash_password(password, bytes.fromhex(salt_hex))
-        return hmac.compare_digest(expected, encoded)
+        return hmac.compare_digest(_hash_password(password, bytes.fromhex(salt_hex)), encoded)
     except (ValueError, TypeError):
         return False
 
@@ -41,24 +40,19 @@ def _dsn() -> str:
 
 
 def setup_auth_store() -> None:
-    with psycopg.connect(_dsn()) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS users (user_id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL)")
-        conn.execute("CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at)")
-        conn.commit()
+    # 数据库结构统一由 db_migrations 管理。
+    return None
 
 
 def create_user(email: str, password: str) -> dict:
     email = email.strip().lower()
     if not email or "@" not in email:
         raise ValueError("invalid email")
-    password_hash = hash_password(password)
     now = datetime.now(timezone.utc)
     user_id = secrets.token_hex(16)
     with psycopg.connect(_dsn()) as conn:
         try:
-            conn.execute("INSERT INTO users(user_id, email, password_hash, created_at, updated_at) VALUES (%s, %s, %s, %s, %s)", (user_id, email, password_hash, now, now))
+            conn.execute("INSERT INTO users(user_id, email, password_hash, created_at, updated_at) VALUES (%s,%s,%s,%s,%s)", (user_id, email, hash_password(password), now, now))
             conn.commit()
         except psycopg.errors.UniqueViolation:
             conn.rollback()
@@ -68,7 +62,7 @@ def create_user(email: str, password: str) -> dict:
 
 def authenticate(email: str, password: str) -> dict | None:
     with psycopg.connect(_dsn()) as conn:
-        row = conn.execute("SELECT user_id, email, password_hash FROM users WHERE email = %s", (email.strip().lower(),)).fetchone()
+        row = conn.execute("SELECT user_id,email,password_hash FROM users WHERE email=%s", (email.strip().lower(),)).fetchone()
     if not row or not verify_password(password, row[2]):
         return None
     return {"user_id": row[0], "email": row[1]}
@@ -77,9 +71,11 @@ def authenticate(email: str, password: str) -> dict | None:
 def create_session(user_id: str) -> tuple[str, datetime]:
     token = secrets.token_urlsafe(48)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    expires_at = datetime.now(timezone.utc) + SESSION_TTL
+    session_id = secrets.token_hex(16)
+    now = datetime.now(timezone.utc)
+    expires_at = now + SESSION_TTL
     with psycopg.connect(_dsn()) as conn:
-        conn.execute("INSERT INTO auth_sessions(token_hash, user_id, expires_at, created_at) VALUES (%s, %s, %s, %s)", (token_hash, user_id, expires_at, datetime.now(timezone.utc)))
+        conn.execute("INSERT INTO auth_sessions(session_id,token_hash,user_id,expires_at,created_at,last_used_at) VALUES (%s,%s,%s,%s,%s,%s)", (session_id, token_hash, user_id, expires_at, now, now))
         conn.commit()
     return token, expires_at
 
@@ -90,7 +86,10 @@ def get_user_by_token(token: str | None) -> dict | None:
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     now = datetime.now(timezone.utc)
     with psycopg.connect(_dsn()) as conn:
-        row = conn.execute("SELECT u.user_id, u.email FROM auth_sessions s JOIN users u ON u.user_id = s.user_id WHERE s.token_hash = %s AND s.expires_at > %s", (token_hash, now)).fetchone()
+        row = conn.execute("SELECT u.user_id,u.email FROM auth_sessions s JOIN users u ON u.user_id=s.user_id WHERE s.token_hash=%s AND s.expires_at>%s", (token_hash, now)).fetchone()
+        if row:
+            conn.execute("UPDATE auth_sessions SET last_used_at=%s WHERE token_hash=%s", (now, token_hash))
+            conn.commit()
     return {"user_id": row[0], "email": row[1]} if row else None
 
 
@@ -99,7 +98,7 @@ def delete_session(token: str | None) -> None:
         return
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     with psycopg.connect(_dsn()) as conn:
-        conn.execute("DELETE FROM auth_sessions WHERE token_hash = %s", (token_hash,))
+        conn.execute("DELETE FROM auth_sessions WHERE token_hash=%s", (token_hash,))
         conn.commit()
 
 
