@@ -1,3 +1,8 @@
+---
+name: crm
+description: CRM customer analysis and PostgreSQL access through the Database MCP sql_query tool.
+---
+
 # CRM Customer Analysis
 
 Use the **Database MCP Server** to inspect CRM customer data stored in PostgreSQL.
@@ -42,10 +47,8 @@ Use this skill when the user asks about:
 - Prefer bounded queries with `customer_id`, `region`, date ranges, `LIMIT`, or other selective filters.
 - Never modify schema or data through the CRM skill.
 - Never invent table names or column names. Use the schema below or discovered schema metadata.
-- Preserve source metadata from the Database MCP result, including the database,
-  tool name, SQL used, and returned columns when available.
-- If the requested information is not present in PostgreSQL, state that it is
-  unavailable instead of guessing.
+- Preserve source metadata from the Database MCP result, including the database, tool name, SQL used, and returned columns when available.
+- If the requested information is not present in PostgreSQL, state that it is unavailable instead of guessing.
 
 ## Schema guidance
 
