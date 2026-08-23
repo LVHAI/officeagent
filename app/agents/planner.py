@@ -15,9 +15,10 @@ from app.agents.model import build_chat_model
 logger = logging.getLogger(__name__)
 
 PLANNER_PROMPT = """
-You are the Supervisor Agent for an enterprise intelligence platform. You are ONLY a
-planner. You must not answer the user's question and you must not execute any child
-agent, MCP tool, RAG retrieval, or web search yourself.
+You are the Supervisor DeepAgent for an enterprise intelligence platform.
+You are the sole planning and delegation decision center. You must not answer the
+user's question and you must not execute any child agent, MCP tool, RAG retrieval,
+or web search yourself.
 
 You MUST call submit_execution_plan exactly once. Create the minimum plan that can
 answer the user's request. Do NOT add a specialist merely because the final task is
@@ -30,37 +31,33 @@ agent name. For optional fields, prefer omitting them rather than emitting null.
 Never invent database fields, product names, or facts not present in the user request
 or available context.
 
-Routing rules:
-- Internal knowledge, manuals, policies, FAQs, recipes, product documentation and
-  questions answerable from the configured Knowledge Base -> knowledge-agent.
-- Current or external internet information -> web-agent.
+Delegation rules:
+- Internal Knowledge Base evidence, manuals, policies, FAQs, recipes, product
+  documentation, or internal documents -> knowledge-agent.
+- Current or external internet evidence -> web-agent.
 - Enterprise live/transactional data such as CRM, customer, orders, sales, finance,
-  ERP and inventory -> tool-agent.
-- Mixed requests may use multiple agents. Independent tasks should share a parallel
-  group and omit dependencies. Only add dependencies when one task genuinely needs
-  another task's result.
-- IMPORTANT: Knowledge Agent, Tool Agent, and Web Agent are independent specialist
-  branches by default. When a request needs two or more of them, run those branches
-  in parallel unless the user explicitly requires one specialist to consume another
-  specialist's intermediate result.
-- Do NOT use depends_on to represent the final synthesis or the phrase "combine",
-  "compare", "analyze together", or similar. Cross-agent synthesis belongs to the
-  Result Aggregator / Report Agent after the independent specialist branches finish.
-- A task that only provides evidence to the final report must have no dependency on
-  another specialist task.
-- Never select all agents by default. Every selected agent must have an explicit
-  evidence requirement in the user request.
-- Do not select knowledge-agent for generic analysis, reasoning, recommendations,
-  customer analysis, market analysis, or because another agent's result will later be
-  combined with internal knowledge. Select it only when the user actually asks for
-  configured Knowledge Base / internal-document evidence.
-- The Tool Agent decides Skill -> MCP internally; do not mention or invent MCP tool
-  names in the plan.
+  ERP, and inventory -> tool-agent.
+- Mixed requests may use multiple agents. Independent tasks must omit dependencies
+  and should share a parallel group. Add dependencies only when one task genuinely
+  requires another specialist's intermediate result.
+- Knowledge Agent, Tool Agent, and Web Agent are independent specialist branches by
+  default. When multiple branches are required, delegate them independently so
+  LangGraph can execute them concurrently.
+- Do NOT use depends_on to represent final synthesis, comparison, or analysis-together.
+  Cross-agent synthesis belongs to Aggregation / Report after specialist execution.
+- Never select all agents by default. Every selected agent must have a concrete
+  evidence requirement in the user's request.
+- The Tool Agent decides Skill -> MCP internally; do not mention or invent concrete
+  MCP tool names in the plan.
 - The Knowledge Agent owns the RAG pipeline directly.
-- If the request asks for current external information, web-agent is required even
-  if the request also needs enterprise data.
-""".strip()
+- If current external information is required, web-agent is required even when the
+  request also needs enterprise data.
+- On replanning, create work only for missing or failed evidence. Do not repeat
+  successful work unless the failed work makes it necessary.
 
+The final decision about which child agents to call belongs to you. Do not rely on a
+Python keyword router or deterministic post-processing to rewrite a valid plan.
+""".strip()
 
 _AGENT_ALIASES = {
     "knowledge": "knowledge-agent",
@@ -77,66 +74,11 @@ _AGENT_ALIASES = {
     "web-agent": "web-agent",
 }
 
-_KNOWLEDGE_SIGNALS = (
-    "知识库",
-    "内部知识",
-    "内部文档",
-    "公司制度",
-    "规章制度",
-    "管理制度",
-    "政策",
-    "手册",
-    "faq",
-    "常见问题",
-    "产品文档",
-    "技术文档",
-    "培训资料",
-    "销售手册",
-    "操作规范",
-    "审批流程",
-    "recipe",
-    "manual",
-    "policy",
-    "internal document",
-    "knowledge base",
-    "product documentation",
-)
-
 
 def _normalize_agent_alias(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     return _AGENT_ALIASES.get(value, value)
-
-
-def _requires_knowledge_base(query: str) -> bool:
-    normalized = query.casefold()
-    return any(signal in normalized for signal in _KNOWLEDGE_SIGNALS)
-
-
-def validate_agent_selection(query: str, plan: ExecutionPlan) -> ExecutionPlan:
-    """Apply the spec's minimum-agent rule as a deterministic post-plan guardrail."""
-    if _requires_knowledge_base(query):
-        return plan
-
-    retained = [task for task in plan.tasks if task.agent != "knowledge-agent"]
-    removed = len(plan.tasks) - len(retained)
-    if not removed:
-        return plan
-
-    if not retained:
-        logger.warning(
-            "supervisor.plan.knowledge_only_without_requirement action=kept query_length=%d",
-            len(query),
-        )
-        return plan
-
-    logger.info(
-        "supervisor.plan.unnecessary_knowledge_removed removed=%d remaining=%d",
-        removed,
-        len(retained),
-    )
-    return plan.model_copy(update={"tasks": retained})
 
 
 class PlannerTaskInput(BaseModel):
@@ -195,9 +137,15 @@ class _PlannerAgent:
         return await self._agent.ainvoke(request)
 
 
-def create_execution_planner() -> _PlannerAgent:
-    logger.info("agent.create supervisor-planner model=deepagent")
+def create_supervisor() -> _PlannerAgent:
+    """Create the single Supervisor DeepAgent used by the LangGraph workflow."""
+    logger.info("agent.create supervisor model=deepagent role=planner")
     return _PlannerAgent()
+
+
+def create_execution_planner() -> _PlannerAgent:
+    """Backward-compatible alias for the canonical Supervisor factory."""
+    return create_supervisor()
 
 
 def _message_value(message: Any, key: str, default: Any = None) -> Any:
@@ -250,7 +198,7 @@ def _normalize_plan(value: dict[str, Any]) -> ExecutionPlan:
 
 
 def extract_execution_plan(result: Any) -> ExecutionPlan:
-    """Extract and canonicalize the planner's structured function call."""
+    """Extract and canonicalize the Supervisor's structured function call."""
     messages = result.get("messages", []) if isinstance(result, dict) else []
     submitted: list[ExecutionPlan] = []
 
