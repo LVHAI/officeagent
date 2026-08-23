@@ -11,6 +11,7 @@ from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_tavily import TavilySearch
 
+from app.agents.knowledge import knowledge_search
 from app.agents.mcp_registry import mcp_registry
 from app.agents.report_models import AnalysisReport, ReportFinding, ReportSource
 from app.agents.model import build_chat_model, ainvoke_chat_model
@@ -32,18 +33,24 @@ create an execution plan, and delegate work to the minimum required specialized
 subagents. Do not execute enterprise business-data work yourself.
 
 Routing rules are mandatory:
+- Knowledge questions, how-to questions, recipes, manuals, policies, FAQs, product
+  documentation, internal documents, and other questions that may be answered from
+  the configured Knowledge Base MUST delegate to knowledge-agent. Do not answer from
+  the model's general knowledge when the Knowledge Base may contain the answer.
+- Knowledge-agent owns the RAG pipeline directly. It MUST NOT use MCP for knowledge
+  retrieval.
+- Requests requiring current or external internet information MUST delegate to
+  web-agent. Do not use web-agent merely because a question is a general knowledge
+  question; use it when fresh/external evidence is required.
 - Enterprise live/transactional/business data queries MUST delegate to tool-agent.
 - Customer, CRM, order, sales, finance, ERP, inventory, or other enterprise-system
   data requests are Tool Agent work even when the request sounds like a knowledge
   question. Do NOT delegate these requests to knowledge-agent merely because the
   request contains words such as "query", "information", or "analysis".
-- Knowledge-agent is only for enterprise documents/knowledge/RAG content such as
-  policies, manuals, contracts, product documents, FAQs, and internal knowledge.
-- web-agent is only for current/external web information.
-- If a request combines independent knowledge and enterprise-data work, delegate
+- If a request combines independent Knowledge Base and enterprise-data work, delegate
   only the necessary agents; do not call every agent by default.
-- For a clearly enterprise-data-only request, tool-agent should normally be the
-  only specialized subagent delegated before reporting.
+- If a request combines Knowledge Base and current web research, delegate both
+  knowledge-agent and web-agent and let the Report Agent reconcile the evidence.
 
 Preserve partial results when a subagent fails and never fabricate missing evidence.
 Return source-aware results. Let Tool Agent perform Skill Selection and MCP Tool
@@ -51,9 +58,15 @@ Selection; the Supervisor must not depend on concrete MCP Tool schemas.
 """.strip()
 
 KNOWLEDGE_PROMPT = """
-You are the Knowledge Agent. Execute the deterministic enterprise RAG pipeline.
-Retrieve enterprise knowledge through configured knowledge tools and preserve
-source metadata such as document, page, section, article, and chunk identifiers.
+You are the Knowledge Agent. Your only retrieval mechanism is the configured
+Knowledge Base RAG pipeline. Call the knowledge_search tool for every knowledge
+retrieval task. Never call MCP, enterprise Skills, CRM/database tools, or web search.
+The knowledge_search tool performs query rewrite, BM25 retrieval, optional Milvus
+vector retrieval, reranking, and source-aware context construction.
+
+Use the returned context as evidence. Preserve document, page, section, article,
+chunk, score, and route metadata. If the RAG result is empty, explicitly report that
+no relevant Knowledge Base evidence was found instead of inventing a source.
 """.strip()
 
 TOOL_PROMPT = f"""
@@ -100,7 +113,8 @@ Skill selection or invoke a concrete MCP tool directly.
 WEB_PROMPT = """
 You are the Web Agent. Use Tavily only when current or external information is
 required. Filter search results, extract evidence, and preserve source URLs,
-titles, and retrieval timestamps.
+titles, and retrieval timestamps. Do not use Web Search for internal Knowledge Base
+retrieval; that belongs to Knowledge Agent.
 """.strip()
 
 REPORT_PROMPT = """
@@ -152,10 +166,11 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
     web_tool = build_tavily_search() if web_tools is None else None
     external_tools = web_tools if web_tools is not None else ([web_tool] if web_tool is not None else [])
     skill_runtime_tools = build_skill_runtime_tools(SKILL_REGISTRY, mcp_registry.get_client)
+    effective_knowledge_tools = knowledge_tools or [knowledge_search]
     logger.info(
         "agent.create supervisor model=%s knowledge_tools=%d tool_agent_tools=%d web_tools=%d tool_agent_skills=%s",
         settings.llm_model,
-        len(knowledge_tools or []),
+        len(effective_knowledge_tools),
         len(skill_runtime_tools),
         len(external_tools),
         SKILLS_PATH,
@@ -167,10 +182,10 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
         subagents=[
             {
                 "name": "knowledge-agent",
-                "description": "Retrieve and cite enterprise knowledge through the RAG pipeline. Do not use for live CRM, sales, order, finance, ERP, inventory, or other enterprise-system data.",
+                "description": "Answer Knowledge Base questions through the direct RAG pipeline. Never use MCP, Skills, enterprise-system tools, or Web Search.",
                 "system_prompt": KNOWLEDGE_PROMPT,
                 "model": model,
-                "tools": knowledge_tools or [],
+                "tools": effective_knowledge_tools,
             },
             {
                 "name": "tool-agent",
@@ -182,7 +197,7 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
             },
             {
                 "name": "web-agent",
-                "description": "Retrieve current external information with Tavily. Do not use for internal enterprise-system data.",
+                "description": "Retrieve current external information with Tavily. Do not use for internal Knowledge Base data.",
                 "system_prompt": WEB_PROMPT,
                 "model": model,
                 "tools": external_tools,
@@ -192,7 +207,11 @@ def create_supervisor(tools=None, knowledge_tools=None, tool_tools=None, web_too
 
 
 def create_knowledge_agent(tools=None):
-    return create_agent(model=build_chat_model(), tools=tools or [], system_prompt=KNOWLEDGE_PROMPT)
+    return create_agent(
+        model=build_chat_model(),
+        tools=tools or [knowledge_search],
+        system_prompt=KNOWLEDGE_PROMPT,
+    )
 
 
 class _ReportAgent:
