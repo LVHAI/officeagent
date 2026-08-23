@@ -7,18 +7,14 @@ import time
 from asyncio import to_thread
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.agents.graph import GLOBAL_TIMEOUT_SECONDS, build_workflow
+from app.core.auth import current_user
 from app.core.config import settings
 from app.core.execution import run_with_timeout
-from app.core.memory import (
-    build_short_term_context,
-    extract_explicit_memories,
-    render_long_term_memories,
-    render_short_term_context,
-)
+from app.core.memory import build_short_term_context, extract_explicit_memories, render_long_term_memories, render_short_term_context
 from app.core.memory_store import PostgresMemoryStore
 from app.core.postgres_store import PostgresTaskStore
 from app.core.redis_state import get_redis_task_coordinator
@@ -32,7 +28,6 @@ class AnalyzeRequest(BaseModel):
     query: str = Field(min_length=1, max_length=8000)
     session_id: str | None = Field(default=None, min_length=1, max_length=200)
     user_id: str | None = Field(default=None, min_length=1, max_length=200)
-
 
 _workflow = None
 _task_store: TaskStore = PostgresTaskStore() if settings.environment != "test" else InMemoryTaskStore()
@@ -87,14 +82,7 @@ def _compact_agent_output(output: dict) -> dict:
                 final_content = content
                 break
         result = {"final_evidence": final_content}
-    return {
-        "agent_id": output.get("agent_id"),
-        "status": output.get("status"),
-        "result": result,
-        "sources": output.get("sources", []),
-        "errors": output.get("errors", []),
-        "elapsed_ms": output.get("elapsed_ms", 0.0),
-    }
+    return {"agent_id": output.get("agent_id"), "status": output.get("status"), "result": result, "sources": output.get("sources", []), "errors": output.get("errors", []), "elapsed_ms": output.get("elapsed_ms", 0.0)}
 
 
 async def _set_redis_status(task_id: str, status: str) -> None:
@@ -107,7 +95,6 @@ async def _set_redis_status(task_id: str, status: str) -> None:
 async def _prepare_memory(session_id: str, user_id: str | None, query: str) -> str:
     if settings.environment == "test":
         return query
-
     await to_thread(_memory_store.ensure_session, session_id, user_id)
     recent = await to_thread(_memory_store.recent_messages, session_id, 20)
     summary = await to_thread(_memory_store.get_summary, session_id)
@@ -116,18 +103,10 @@ async def _prepare_memory(session_id: str, user_id: str | None, query: str) -> s
     if user_id:
         memories = await to_thread(_memory_store.list_long_term_memories, user_id, 20)
         long_term = render_long_term_memories(memories)
-
-    user_message_id = await to_thread(
-        _memory_store.append_message,
-        session_id,
-        "user",
-        query,
-        user_id=user_id,
-    )
+    user_message_id = await to_thread(_memory_store.append_message, session_id, "user", query, user_id=user_id)
     if user_id:
         for memory in extract_explicit_memories(user_id, user_message_id, query):
             await to_thread(_memory_store.upsert_long_term_memory, memory)
-
     parts = [part for part in (long_term, short_term, f"[Current User Request]\n{query}") if part]
     return "\n\n".join(parts)
 
@@ -155,27 +134,10 @@ async def run_analysis(query: str, *, session_id: str | None = None, user_id: st
         logger.info("analysis.memory.prepared task_id=%s session_id=%s context_length=%d", task_id, session_id, len(memory_query))
         workflow = _get_workflow()
         workflow_started = time.perf_counter()
-        result = await run_with_timeout(
-            workflow.ainvoke(
-                {"query": memory_query, "task_id": task_id, "errors": [], "traces": [], "delegations": [], "agent_outputs": []},
-                config={"configurable": {"thread_id": session_id}},
-            ),
-            timeout=GLOBAL_TIMEOUT_SECONDS,
-        )
+        result = await run_with_timeout(workflow.ainvoke({"query": memory_query, "task_id": task_id, "errors": [], "traces": [], "delegations": [], "agent_outputs": []}, config={"configurable": {"thread_id": session_id}}), timeout=GLOBAL_TIMEOUT_SECONDS)
         logger.info("analysis.workflow.invoke.completed task_id=%s session_id=%s elapsed_ms=%.1f errors=%d traces=%d agent_outputs=%d", task_id, session_id, (time.perf_counter() - workflow_started) * 1000, len(result.get("errors", [])), len(result.get("traces", [])), len(result.get("agent_outputs", [])))
         response_agent_outputs = [_compact_agent_output(output) for output in result.get("agent_outputs", [])]
-        response = {
-            "task_id": task_id,
-            "session_id": session_id,
-            "user_id": user_id,
-            "query": query,
-            "status": result.get("status", "completed" if not result.get("errors") else "partial"),
-            "report": result.get("report"),
-            "errors": result.get("errors", []),
-            "traces": result.get("traces", []),
-            "delegations": result.get("delegations", []),
-            "agent_outputs": response_agent_outputs,
-        }
+        response = {"task_id": task_id, "session_id": session_id, "user_id": user_id, "query": query, "status": result.get("status", "completed" if not result.get("errors") else "partial"), "report": result.get("report"), "errors": result.get("errors", []), "traces": result.get("traces", []), "delegations": result.get("delegations", []), "agent_outputs": response_agent_outputs}
         if settings.environment != "test":
             assistant_content = _assistant_content(response)
             if assistant_content:
@@ -198,8 +160,9 @@ async def run_analysis(query: str, *, session_id: str | None = None, user_id: st
 
 
 @router.post("/analyze")
-async def analyze(request: AnalyzeRequest) -> dict:
-    return await run_analysis(request.query, session_id=request.session_id, user_id=request.user_id)
+async def analyze(request: AnalyzeRequest, user: dict = Depends(current_user)) -> dict:
+    session_id = request.session_id or str(uuid4())
+    return await run_analysis(request.query, session_id=session_id, user_id=user["user_id"])
 
 
 @router.get("/tasks/{task_id}")
